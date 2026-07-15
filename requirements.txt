@@ -1,0 +1,8 @@
+# --- Конвертер (Разработчик 2) ---
+pdf2docx>=0.5.8        # PDF -> Word
+img2pdf>=0.5.0         # картинки -> PDF (без пережатия)
+# LibreOffice ставится СИСТЕМНО, не через pip — см. README (Word/Excel/PPT -> PDF)
+
+# --- Бот (Разработчик 3, минимальная версия) ---
+pyTelegramBotAPI>=4.14.0
+python-dotenv>=1.0.0
