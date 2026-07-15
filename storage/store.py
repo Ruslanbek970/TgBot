@@ -55,3 +55,52 @@ def list_companies() -> list[str]:
         name for name in os.listdir(BASE_DIR)
         if os.path.isdir(os.path.join(BASE_DIR, name))
     )
+
+def create_company(name: str) -> bool:
+    """Создать новую компанию (папку)."""
+    name = name.strip()
+    if not name:
+        return False
+    path = os.path.join(BASE_DIR, name)
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+        return True
+    return False
+
+def save_document(company: str, temp_file_path: str, file_name: str) -> str:
+    """Сохранить документ в папку компании."""
+    import shutil
+    company = company.strip()
+    path = os.path.join(BASE_DIR, company)
+    os.makedirs(path, exist_ok=True)
+    
+    dest_path = os.path.join(path, file_name)
+    shutil.copy2(temp_file_path, dest_path)
+    return dest_path
+
+def delete_company(name: str) -> bool:
+    import shutil
+    name = name.strip()
+    if not name:
+        return False
+    path = os.path.join(BASE_DIR, name)
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+        return True
+    return False
+
+def list_files(company: str) -> list[str]:
+    company = company.strip()
+    path = os.path.join(BASE_DIR, company)
+    if not os.path.isdir(path):
+        return []
+    return sorted(f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)))
+
+def delete_file(company: str, filename: str) -> bool:
+    company = company.strip()
+    filename = filename.strip()
+    path = os.path.join(BASE_DIR, company, filename)
+    if os.path.isfile(path):
+        os.remove(path)
+        return True
+    return False

@@ -13,6 +13,7 @@ except ImportError:
     pass  # python-dotenv не обязателен, можно задать переменную вручную
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # Лимит на скачивание файла ботом (Telegram getFile ~20 МБ).
 MAX_DOWNLOAD_MB = 20

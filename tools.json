@@ -1,0 +1,37 @@
+[
+  {
+    "name": "create_company",
+    "description": "Создает новую компанию (папку). Используйте, когда пользователь просит создать компанию.",
+    "parameters": ["company_name"],
+    "command": ["python", "storage/cli.py", "create_company", "{company_name}"],
+    "reply_text": "Компания '{company_name}' обработана."
+  },
+  {
+    "name": "delete_company",
+    "description": "Удаляет компанию и все её документы. Используйте, когда пользователь просит удалить компанию.",
+    "parameters": ["company_name"],
+    "command": ["python", "storage/cli.py", "delete_company", "{company_name}"],
+    "reply_text": "Компания '{company_name}' удалена."
+  },
+  {
+    "name": "list_companies",
+    "description": "Показывает список всех компаний. Используйте, когда пользователь просит показать компании.",
+    "parameters": [],
+    "command": ["python", "storage/cli.py", "list_companies"],
+    "reply_text": "Выполнен запрос списка компаний."
+  },
+  {
+    "name": "list_files",
+    "description": "Показывает список файлов (документов) в конкретной компании. Используйте, когда пользователь просит найти или показать документы компании.",
+    "parameters": ["company_name"],
+    "command": ["python", "storage/cli.py", "list_files", "{company_name}"],
+    "reply_text": "Документы для '{company_name}':"
+  },
+  {
+    "name": "delete_file",
+    "description": "Удаляет файл в указанной компании. Используйте, когда пользователь просит удалить файл.",
+    "parameters": ["company_name", "filename"],
+    "command": ["python", "storage/cli.py", "delete_file", "{company_name}", "{filename}"],
+    "reply_text": "Файл '{filename}' в компании '{company_name}' удален."
+  }
+]
