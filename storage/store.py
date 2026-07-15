@@ -362,3 +362,316 @@ def delete_company(name: str) -> bool:
             existed = True
 
     return existed
+
+
+# PostgreSQL-backed storage. These final definitions keep the public API stable
+# and fall back to the local JSON/filesystem implementation if PostgreSQL is not
+# configured or temporarily unavailable.
+from contextlib import suppress
+
+try:
+    from .db import get_cursor, is_available as _db_is_available
+    from .schema import init_schema as _init_db_schema
+except ImportError:
+    try:
+        from db import get_cursor, is_available as _db_is_available
+        from schema import init_schema as _init_db_schema
+    except ImportError:
+        get_cursor = None
+
+        def _db_is_available() -> bool:
+            return False
+
+        def _init_db_schema() -> bool:
+            return False
+
+
+_json_create_company = create_company
+_json_list_companies = list_companies
+_json_save_document = save_document
+_json_find_documents = find_documents
+_json_list_files = list_files
+_json_delete_file = delete_file
+_json_delete_company = delete_company
+_DB_READY_CACHE: bool | None = None
+
+
+def _db_ready() -> bool:
+    global _DB_READY_CACHE
+    if _DB_READY_CACHE is not None:
+        return _DB_READY_CACHE
+    if not _db_is_available():
+        _DB_READY_CACHE = False
+        return False
+    try:
+        _DB_READY_CACHE = bool(_init_db_schema())
+    except Exception:
+        _DB_READY_CACHE = False
+    return _DB_READY_CACHE
+
+
+def _db_create_company(name: str) -> tuple[int, bool]:
+    if get_cursor is None:
+        raise RuntimeError("PostgreSQL cursor is unavailable")
+
+    with get_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO storage_companies (name) VALUES (%s) "
+            "ON CONFLICT (name) DO NOTHING RETURNING id;",
+            (name,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0], True
+
+        cursor.execute("SELECT id FROM storage_companies WHERE name = %s;", (name,))
+        existing = cursor.fetchone()
+        if not existing:
+            raise RuntimeError("company was not created")
+        return existing[0], False
+
+
+def create_company(name: str) -> bool:
+    name = _clean_name(name)
+    if not name:
+        return False
+
+    if _db_ready():
+        try:
+            _company_id, created = _db_create_company(name)
+            (DOCUMENTS_DIR / name).mkdir(parents=True, exist_ok=True)
+            return created
+        except Exception:
+            pass
+
+    return _json_create_company(name)
+
+
+def list_companies() -> list[str]:
+    names: set[str] = set()
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            with get_cursor() as cursor:
+                cursor.execute("SELECT name FROM storage_companies ORDER BY name;")
+                names.update(row[0] for row in cursor.fetchall())
+        except Exception:
+            pass
+
+    names.update(_json_list_companies())
+    return sorted(name for name in names if name)
+
+
+def save_document(company: str, temp_file_path: str, file_name: str) -> str:
+    company = _clean_name(company)
+    file_name = _clean_name(file_name)
+    if not company:
+        raise ValueError("company is required")
+    if not file_name:
+        raise ValueError("file_name is required")
+
+    source = Path(temp_file_path)
+    if not source.is_file():
+        raise FileNotFoundError(temp_file_path)
+
+    file_id = uuid.uuid4().hex
+    target = _secure_path(file_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            company_id, _created = _db_create_company(company)
+            search_text = f"{company} {file_name}"
+            with get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO storage_documents (
+                        id, company_id, original_name, secure_path, file_size,
+                        min_role, search_text, search_vector
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        'employee', %s, to_tsvector('simple', %s)
+                    );
+                    """,
+                    (
+                        file_id,
+                        company_id,
+                        file_name,
+                        str(target),
+                        target.stat().st_size,
+                        search_text,
+                        search_text,
+                    ),
+                )
+            return str(target)
+        except Exception:
+            _delete_secure_path(str(target))
+
+    return _json_save_document(company, temp_file_path, file_name)
+
+
+def find_documents(query: str) -> list[str]:
+    query_norm = _norm(query)
+    if not query_norm:
+        return []
+
+    results: list[str] = []
+    seen: set[str] = set()
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            like_query = f"%{query_norm}%"
+            ts_query = " & ".join(part for part in query_norm.split() if part)
+            with get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT d.secure_path
+                    FROM storage_documents d
+                    JOIN storage_companies c ON c.id = d.company_id
+                    WHERE
+                        lower(c.name || ' ' || d.original_name) LIKE %s
+                        OR d.search_vector @@ plainto_tsquery('simple', %s)
+                    ORDER BY d.created_at DESC;
+                    """,
+                    (like_query, ts_query or query_norm),
+                )
+                for (path,) in cursor.fetchall():
+                    if path and os.path.isfile(path):
+                        results.append(path)
+                        seen.add(os.path.abspath(path))
+        except Exception:
+            pass
+
+    for path in _json_find_documents(query):
+        path_abs = os.path.abspath(path)
+        if path_abs not in seen:
+            results.append(path)
+
+    return results
+
+
+def list_files(company: str) -> list[str]:
+    company_norm = _norm(company)
+    if not company_norm:
+        return []
+
+    files: set[str] = set()
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            with get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT d.original_name
+                    FROM storage_documents d
+                    JOIN storage_companies c ON c.id = d.company_id
+                    WHERE lower(c.name) = %s
+                    ORDER BY d.original_name;
+                    """,
+                    (company_norm,),
+                )
+                files.update(row[0] for row in cursor.fetchall())
+        except Exception:
+            pass
+
+    files.update(_json_list_files(company))
+    return sorted(name for name in files if name)
+
+
+def delete_file(company: str, filename: str) -> bool:
+    company_norm = _norm(company)
+    filename_norm = _norm(filename)
+    if not company_norm or not filename_norm:
+        return False
+
+    deleted = False
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            with get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT d.id, d.secure_path
+                    FROM storage_documents d
+                    JOIN storage_companies c ON c.id = d.company_id
+                    WHERE lower(c.name) = %s AND lower(d.original_name) = %s;
+                    """,
+                    (company_norm, filename_norm),
+                )
+                rows = cursor.fetchall()
+                for _doc_id, path in rows:
+                    _delete_secure_path(path)
+                cursor.execute(
+                    """
+                    DELETE FROM storage_documents d
+                    USING storage_companies c
+                    WHERE d.company_id = c.id
+                    AND lower(c.name) = %s
+                    AND lower(d.original_name) = %s;
+                    """,
+                    (company_norm, filename_norm),
+                )
+                deleted = bool(rows) or cursor.rowcount > 0
+        except Exception:
+            pass
+
+    return _json_delete_file(company, filename) or deleted
+
+
+def delete_company(name: str) -> bool:
+    name_norm = _norm(name)
+    if not name_norm:
+        return False
+
+    deleted = False
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            with get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT d.secure_path
+                    FROM storage_documents d
+                    JOIN storage_companies c ON c.id = d.company_id
+                    WHERE lower(c.name) = %s;
+                    """,
+                    (name_norm,),
+                )
+                paths = [row[0] for row in cursor.fetchall()]
+                for path in paths:
+                    _delete_secure_path(path)
+                cursor.execute(
+                    "DELETE FROM storage_companies WHERE lower(name) = %s;",
+                    (name_norm,),
+                )
+                deleted = bool(paths) or cursor.rowcount > 0
+        except Exception:
+            pass
+
+    return _json_delete_company(name) or deleted
+
+
+def log_access(
+    telegram_id: int | None,
+    document_id: str | None,
+    action_type: str,
+    allowed: bool = True,
+) -> bool:
+    if not action_type or not _db_ready() or get_cursor is None:
+        return False
+
+    with suppress(Exception):
+        with get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO storage_access_logs (
+                    telegram_id, document_id, action_type, allowed
+                )
+                VALUES (%s, %s, %s, %s);
+                """,
+                (telegram_id, document_id, action_type, allowed),
+            )
+        return True
+    return False

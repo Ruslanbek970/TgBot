@@ -26,6 +26,7 @@ telebot.apihelper.CONNECT_TIMEOUT = 30
 telebot.apihelper.READ_TIMEOUT = 60
 
 user_history = collections.defaultdict(lambda: collections.deque(maxlen=5))
+pending_file_company: dict[int, str] = {}
 
 try:
     with open("tools.json", "r", encoding="utf-8") as f:
@@ -55,6 +56,14 @@ def _send_document_with_retry(chat_id, path, retries=3, delay=2):
                 time.sleep(delay)
     raise last_exc
 
+def _send_company_documents(chat_id, company: str) -> bool:
+    docs = [path for path in find_documents(company) if not path.endswith(".meta.txt")]
+    if not docs:
+        return False
+    for path in docs:
+        _send_document_with_retry(chat_id, path)
+    return True
+
 def get_main_keyboard() -> types.ReplyKeyboardMarkup:
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
@@ -73,6 +82,7 @@ def cmd_start(message):
         "• `/delete_company <имя>` — Удалить компанию\n"
         "• `/list_companies` — Список компаний\n"
         "• `/list_files <компания>` — Список файлов компании\n"
+        "• `/add_file <компания>` — Добавить следующий отправленный файл в компанию\n"
         "• `/delete_file <компания> <имя_файла>` — Удалить файл\n\n"
         "🤖 *ИИ-режим:*\n"
         "Ты можешь просто писать мне текстом (например, «Удали компанию тексол»), "
@@ -118,6 +128,19 @@ def cmd_delete_file(message):
     if delete_file(parts[1], parts[2]): bot.reply_to(message, "✅ Файл удален.")
     else: bot.reply_to(message, "❌ Файл не найден.")
 
+@bot.message_handler(commands=["add_file"])
+def cmd_add_file(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return bot.reply_to(message, "Использование: /add_file <компания>")
+
+    company = parts[1].strip()
+    if not company:
+        return bot.reply_to(message, "Использование: /add_file <компания>")
+
+    pending_file_company[message.chat.id] = company
+    bot.reply_to(message, f"Ок. Отправь файл, я сохраню его в «{company}».")
+
 # --- Document Handling ---
 
 @bot.message_handler(content_types=["document", "photo"])
@@ -131,7 +154,10 @@ def on_document(message):
     caption_lower = caption.lower()
     
     is_save_request = False
-    company_to_save = ""
+    company_to_save = pending_file_company.pop(message.chat.id, "")
+    if company_to_save:
+        is_save_request = True
+
     for prefix in ("store to ", "store ", "сохранить в ", "сохранить ", "в ", "save to ", "save "):
         if caption_lower.startswith(prefix):
             is_save_request = True
@@ -203,15 +229,53 @@ def on_text(message):
         return
 
     if not GEMINI_API_KEY:
-        # Fallback for old behaviour if no API key
+        # Manual fallback when Gemini is not configured.
+        if low in ("список компаний", "компании", "list companies"):
+            cmd_list_companies(message)
+            return
+
+        for prefix in ("создай компанию ", "создать компанию ", "create company "):
+            if low.startswith(prefix):
+                name = text[len(prefix):].strip()
+                if create_company(name):
+                    bot.reply_to(message, f"✅ Создана {name}")
+                else:
+                    bot.reply_to(message, "❌ Ошибка (уже существует?)")
+                return
+
+        for prefix in ("удали компанию ", "удалить компанию ", "delete company "):
+            if low.startswith(prefix):
+                name = text[len(prefix):].strip()
+                if delete_company(name):
+                    bot.reply_to(message, f"✅ Удалена {name}")
+                else:
+                    bot.reply_to(message, "❌ Не найдена")
+                return
+
+        for prefix in ("файлы ", "документы ", "документы по ", "files ", "documents "):
+            if low.startswith(prefix):
+                query = text[len(prefix):].strip()
+                if _send_company_documents(message.chat.id, query):
+                    bot.reply_to(message, f"Нашел документы для «{query}».")
+                else:
+                    bot.reply_to(message, "Документы не найдены.")
+                return
+
         if low.startswith("документы по"):
             query = text[len("документы по"):].strip()
-            files = find_documents(query)
-            if files:
+            if _send_company_documents(message.chat.id, query):
                 bot.reply_to(message, "Нашел:")
-                for f in files: _send_document_with_retry(message.chat.id, f)
+            else:
+                bot.reply_to(message, "Документы не найдены.")
             return
-        bot.reply_to(message, "Свободный текст отключен (нет GEMINI_API_KEY).")
+
+        bot.reply_to(
+            message,
+            "Gemini API key не задан. Работают команды /create_company, "
+            "/list_companies, /list_files, /delete_file и сохранение файла "
+            "с подписью `save to <компания>`.",
+            parse_mode="Markdown",
+        )
         return
 
     history = user_history[message.chat.id]

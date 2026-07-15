@@ -1,11 +1,35 @@
 services:
+  db:
+    image: postgres:16-alpine
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tgbot_storage}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tgbot_storage}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   bot:
     build: .
     # BOT_TOKEN и (необязательно) SOFFICE_PATH берутся из файла .env
     env_file:
       - .env
+    depends_on:
+      db:
+        condition: service_healthy
     volumes:
       # Документы можно класть/менять на хосте без пересборки образа.
       # Папка = компания, внутри её файлы (см. storage/documents/).
       - ./storage/documents:/app/storage/documents
+      - ./storage/secure_files:/app/storage/secure_files
     restart: unless-stopped
+
+volumes:
+  postgres_data:

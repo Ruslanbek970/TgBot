@@ -28,6 +28,13 @@
     "reply_text": "Документы для '{company_name}':"
   },
   {
+    "name": "add_file",
+    "description": "Adds an existing local file to the selected company storage. Use only when company_name and file_path are known. Telegram users can also add files by sending a document with caption 'save to <company>'.",
+    "parameters": ["company_name", "file_path", "file_name"],
+    "command": ["python", "storage/cli.py", "add_file", "{company_name}", "{file_path}", "{file_name}"],
+    "reply_text": "File '{file_name}' added to company '{company_name}'."
+  },
+  {
     "name": "delete_file",
     "description": "Удаляет файл в указанной компании. Используйте, когда пользователь просит удалить файл.",
     "parameters": ["company_name", "filename"],

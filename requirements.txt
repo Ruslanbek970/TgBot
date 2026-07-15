@@ -8,3 +8,6 @@ img2pdf>=0.5.0         # images -> PDF (lossless)
 # --- Bot (Developer 3, minimal version) ---
 pyTelegramBotAPI>=4.14.0
 python-dotenv>=1.0.0
+
+# --- Storage (Developer 1) ---
+psycopg2-binary>=2.9.9
