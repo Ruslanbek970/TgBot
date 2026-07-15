@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
+import traceback
 
 import telebot
 
@@ -28,8 +30,41 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Больше времени на скачивание/отдачу крупных документов.
+telebot.apihelper.CONNECT_TIMEOUT = 30
+telebot.apihelper.READ_TIMEOUT = 60
+
 # Префиксы, по которым распознаём запрос документов из хранилища.
 _DOC_PREFIXES = ("документы по", "документы", "/docs")
+
+
+def _redact(text: str) -> str:
+    """Вырезать токен из текста, чтобы он не утёк в чат или логи."""
+    if BOT_TOKEN and BOT_TOKEN in text:
+        return text.replace(BOT_TOKEN, "<TOKEN>")
+    return text
+
+
+def _send_document_with_retry(chat_id, path, retries=3, delay=2):
+    """
+    Отправить документ с повтором.
+
+    Сглаживает разовые сетевые сбои (SSLWantWriteError, таймауты) при отдаче
+    файла в Telegram. На стабильном сервере такое редко, но с домашней сети
+    случается.
+    """
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            with open(path, "rb") as f:
+                bot.send_document(chat_id, f, visible_file_name=os.path.basename(path))
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            print(f"[warn] отправка не удалась, попытка {attempt}/{retries}: {type(exc).__name__}")
+            if attempt < retries:
+                time.sleep(delay)
+    raise last_exc
 
 
 @bot.message_handler(commands=["start", "help"])
@@ -81,16 +116,16 @@ def on_document(message):
             bot.reply_to(message, f"Результат больше {MAX_SEND_MB} МБ — не могу отправить.")
             return
 
-        # 4) отправляем результат
-        with open(out_path, "rb") as f:
-            bot.send_document(
-                message.chat.id, f, visible_file_name=os.path.basename(out_path)
-            )
+        # 4) отправляем результат (с повтором на случай сетевого сбоя)
+        _send_document_with_retry(message.chat.id, out_path)
 
     except ConverterError as exc:
         bot.reply_to(message, f"Не получилось: {exc}")
-    except Exception as exc:  # noqa: BLE001 — бот не должен падать от одного файла
-        bot.reply_to(message, f"Непредвиденная ошибка: {exc}")
+    except Exception:  # бот не должен падать от одного файла
+        # НЕ показываем сырую ошибку пользователю — в её тексте может быть токен
+        # (Telegram включает токен в URL запроса). В консоль пишем без токена.
+        print("[error]", _redact(traceback.format_exc()))
+        bot.reply_to(message, "Не удалось отправить результат — похоже, сетевой сбой. Попробуй ещё раз.")
     finally:
         # чистим временные файлы (конфиденциальность + диск)
         cleanup(src_path, out_path)
@@ -133,12 +168,10 @@ def on_text(message):
     bot.reply_to(message, f"Нашёл {len(files)} документ(ов) по «{query}»:")
     for path in files:
         try:
-            with open(path, "rb") as f:
-                bot.send_document(
-                    message.chat.id, f, visible_file_name=os.path.basename(path)
-                )
-        except OSError:
-            bot.send_message(message.chat.id, f"Не смог открыть: {os.path.basename(path)}")
+            _send_document_with_retry(message.chat.id, path)
+        except Exception:  # noqa: BLE001
+            print("[error]", _redact(traceback.format_exc()))
+            bot.send_message(message.chat.id, f"Не смог отправить: {os.path.basename(path)}")
 
 
 def run():
