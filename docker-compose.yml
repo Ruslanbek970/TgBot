@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    # BOT_TOKEN и (необязательно) SOFFICE_PATH берутся из файла .env
+    env_file:
+      - .env
+    volumes:
+      # Документы можно класть/менять на хосте без пересборки образа.
+      # Папка = компания, внутри её файлы (см. storage/documents/).
+      - ./storage/documents:/app/storage/documents
+    restart: unless-stopped

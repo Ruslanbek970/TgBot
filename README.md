@@ -52,6 +52,22 @@ TgBot/
 
 ## Запуск
 
+### Вариант A — Docker (рекомендуется: LibreOffice уже внутри)
+
+```bash
+cp .env.example .env      # впиши BOT_TOKEN от @BotFather (Windows: copy)
+docker compose up --build
+```
+
+Образ уже содержит LibreOffice и шрифты (латиница + кириллица) — доустанавливать ничего не нужно. Документы для выдачи кладутся в `storage/documents/<Компания>/` (папка примонтирована, пересборка не нужна).
+
+Быстрый тест конвертера без бота (проверить, что LibreOffice на месте):
+```bash
+docker compose run --rm bot python -m converter "storage/documents/Тексол Транс/протокол.txt" pdf
+```
+
+### Вариант B — локально (без Docker)
+
 ```bash
 # 1. зависимости Python
 pip install -r requirements.txt
