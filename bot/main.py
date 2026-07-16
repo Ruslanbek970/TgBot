@@ -15,7 +15,7 @@ import google.generativeai as genai
 from bot.config import BOT_TOKEN, MAX_DOWNLOAD_MB, MAX_SEND_MB, GEMINI_API_KEY
 from converter import convert, ConverterError
 from converter.utils import cleanup, get_extension
-from storage import find_documents, list_companies, create_company, save_document, delete_company, list_files, delete_file
+from storage import find_documents, list_companies, create_company, save_document, delete_company, list_files, delete_file, get_document
 
 if not BOT_TOKEN:
     raise SystemExit("Не задан BOT_TOKEN.")
@@ -43,12 +43,12 @@ def _redact(text: str) -> str:
         return text.replace(BOT_TOKEN, "<TOKEN>")
     return text
 
-def _send_document_with_retry(chat_id, path, retries=3, delay=2):
+def _send_document_with_retry(chat_id, path, retries=3, delay=2, visible_file_name=None):
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
             with open(path, "rb") as f:
-                bot.send_document(chat_id, f, visible_file_name=os.path.basename(path))
+                bot.send_document(chat_id, f, visible_file_name=visible_file_name or os.path.basename(path))
             return
         except Exception as exc:
             last_exc = exc
@@ -63,6 +63,24 @@ def _send_company_documents(chat_id, company: str) -> bool:
     for path in docs:
         _send_document_with_retry(chat_id, path)
     return True
+
+def _parse_company_and_file(text: str) -> tuple[str, str] | None:
+    value = text.strip()
+    if not value:
+        return None
+
+    value_norm = value.casefold()
+    for company in sorted(list_companies(), key=len, reverse=True):
+        company_norm = company.casefold()
+        if value_norm == company_norm:
+            return None
+        if value_norm.startswith(company_norm + " "):
+            return company, value[len(company):].strip()
+
+    parts = value.split(maxsplit=1)
+    if len(parts) == 2:
+        return parts[0], parts[1].strip()
+    return None
 
 def get_main_keyboard() -> types.ReplyKeyboardMarkup:
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -83,6 +101,7 @@ def cmd_start(message):
         "• `/list_companies` — Список компаний\n"
         "• `/list_files <компания>` — Список файлов компании\n"
         "• `/add_file <компания>` — Добавить следующий отправленный файл в компанию\n"
+        "• `/download <компания> <имя_файла>` — Скачать файл\n"
         "• `/delete_file <компания> <имя_файла>` — Удалить файл\n\n"
         "🤖 *ИИ-режим:*\n"
         "Ты можешь просто писать мне текстом (например, «Удали компанию тексол»), "
@@ -127,6 +146,27 @@ def cmd_delete_file(message):
     if len(parts) < 3: return bot.reply_to(message, "Использование: /delete_file <компания> <файл>")
     if delete_file(parts[1], parts[2]): bot.reply_to(message, "✅ Файл удален.")
     else: bot.reply_to(message, "❌ Файл не найден.")
+
+@bot.message_handler(commands=["download"])
+def cmd_download(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return bot.reply_to(message, "Использование: /download <компания> <файл>")
+
+    parsed = _parse_company_and_file(parts[1])
+    if not parsed:
+        return bot.reply_to(message, "Использование: /download <компания> <файл>")
+
+    company, filename = parsed
+    document = get_document(company, filename)
+    if not document:
+        return bot.reply_to(message, "❌ Файл не найден.")
+
+    path, original_name = document
+    if os.path.getsize(path) > MAX_SEND_MB * 1024 * 1024:
+        return bot.reply_to(message, "Файл слишком большой для отправки.")
+
+    _send_document_with_retry(message.chat.id, path, visible_file_name=original_name)
 
 @bot.message_handler(commands=["add_file"])
 def cmd_add_file(message):

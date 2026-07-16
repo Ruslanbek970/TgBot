@@ -105,6 +105,14 @@ def delete_file(company: str, filename: str) -> bool:
         return True
     return False
 
+def get_document(company: str, filename: str) -> tuple[str, str] | None:
+    company = company.strip()
+    filename = filename.strip()
+    path = os.path.join(BASE_DIR, company, filename)
+    if os.path.isfile(path):
+        return path, filename
+    return None
+
 
 # Secure storage implementation. Definitions below intentionally override the
 # initial filesystem stub while keeping the same public function names.
@@ -336,6 +344,29 @@ def delete_file(company: str, filename: str) -> bool:
     return deleted
 
 
+def get_document(company: str, filename: str) -> tuple[str, str] | None:
+    company_norm = _norm(company)
+    filename_norm = _norm(filename)
+    if not company_norm or not filename_norm:
+        return None
+
+    data = _load_index()
+    for doc in data.get("documents", []):
+        if (
+            _norm(doc.get("company", "")) == company_norm
+            and _norm(doc.get("original_name", "")) == filename_norm
+            and doc.get("secure_path")
+            and os.path.isfile(doc["secure_path"])
+        ):
+            return doc["secure_path"], doc.get("original_name", filename)
+
+    for legacy_company, legacy_name, path in _legacy_files(company):
+        if _norm(legacy_company) == company_norm and _norm(legacy_name) == filename_norm:
+            return str(path), legacy_name
+
+    return None
+
+
 def delete_company(name: str) -> bool:
     name_norm = _norm(name)
     if not name_norm:
@@ -392,6 +423,7 @@ _json_save_document = save_document
 _json_find_documents = find_documents
 _json_list_files = list_files
 _json_delete_file = delete_file
+_json_get_document = get_document
 _json_delete_company = delete_company
 _DB_READY_CACHE: bool | None = None
 
@@ -618,6 +650,35 @@ def delete_file(company: str, filename: str) -> bool:
             pass
 
     return _json_delete_file(company, filename) or deleted
+
+
+def get_document(company: str, filename: str) -> tuple[str, str] | None:
+    company_norm = _norm(company)
+    filename_norm = _norm(filename)
+    if not company_norm or not filename_norm:
+        return None
+
+    if _db_ready() and get_cursor is not None:
+        try:
+            with get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT d.secure_path, d.original_name
+                    FROM storage_documents d
+                    JOIN storage_companies c ON c.id = d.company_id
+                    WHERE lower(c.name) = %s AND lower(d.original_name) = %s
+                    ORDER BY d.created_at DESC
+                    LIMIT 1;
+                    """,
+                    (company_norm, filename_norm),
+                )
+                row = cursor.fetchone()
+                if row and row[0] and os.path.isfile(row[0]):
+                    return row[0], row[1]
+        except Exception:
+            pass
+
+    return _json_get_document(company, filename)
 
 
 def delete_company(name: str) -> bool:
