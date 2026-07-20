@@ -1,4 +1,8 @@
 {
-  "companies": {},
+  "companies": {
+    "common": {
+      "name": "Common"
+    }
+  },
   "documents": []
 }

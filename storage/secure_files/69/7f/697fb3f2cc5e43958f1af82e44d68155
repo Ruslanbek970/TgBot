@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#010307; --panel:#24282c; --panel-2:#24282c; --line:#253046;
+    --ink:#e7ecf5; --ink-dim:#8b99b3;
+    --amber:#f2a541; --cyan:#4fd1c5; --violet:#9d8cff; --red:#ff6b6b;
+    --mono:'JetBrains Mono','Courier New',monospace;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--bg); color:var(--ink); font-family:'Space Grotesk',sans-serif; min-height:100vh; }
+  .wrap{max-width:1240px;margin:0 auto;padding:36px 24px 80px;}
+
+  header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px;flex-wrap:wrap;gap:12px;}
+  header .brand{display:flex;align-items:center;gap:12px;}
+  header .mark{width:34px;height:34px;border-radius:8px;background:linear-gradient(135deg,var(--amber),var(--red));display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;color:#0d1117;font-size:14px;}
+  header h1{font-size:20px;margin:0;font-weight:600;letter-spacing:.2px;}
+  header p{margin:2px 0 0;color:var(--ink-dim);font-size:13px;font-family:var(--mono);}
+
+  .drop{ border:1.5px dashed var(--line); border-radius:14px; padding:40px 24px; text-align:center; background:var(--panel); cursor:pointer; transition:.2s; position:relative; overflow:hidden; }
+  .drop.drag{border-color:var(--amber); background:#171f1a;}
+  .drop h2{margin:0 0 6px; font-size:18px; font-weight:600;}
+  .drop p{margin:0; color:var(--ink-dim); font-size:13px; font-family:var(--mono);}
+  .drop .types{margin-top:14px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;}
+  .tag{font-family:var(--mono); font-size:11px; padding:4px 10px; border:1px solid var(--line); border-radius:99px; color:var(--ink-dim);}
+  input[type=file]{display:none;}
+
+  .scan{position:absolute; left:0; right:0; top:0; height:2px; background:linear-gradient(90deg,transparent,var(--amber),transparent); animation:scan 1.4s linear infinite; opacity:0;}
+  .scan.active{opacity:1;}
+  @keyframes scan{0%{top:0;}100%{top:100%;}}
+
+  #status{font-family:var(--mono); font-size:12px; color:var(--ink-dim); margin-top:10px; min-height:16px;}
+
+  #fileTabs{display:flex; gap:8px; flex-wrap:wrap; margin-top:22px;}
+  .ftab{display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:8px 12px; font-family:var(--mono); font-size:12px; cursor:pointer; color:var(--ink-dim);}
+  .ftab.active{border-color:var(--amber); color:var(--ink);}
+  .ftab .x{color:var(--ink-dim); font-weight:700; padding:0 2px;}
+  .ftab .x:hover{color:var(--red);}
+  .ftab.addmore{border-style:dashed; color:var(--ink-dim);}
+
+  #dash{margin-top:22px; display:none;}
+  .filebar{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap;gap:10px;}
+  .filebar .fname{font-family:var(--mono); font-size:13px; color:var(--amber); display:flex; align-items:center; gap:10px;}
+  .filebar .actions{display:flex; gap:8px; flex-wrap:wrap;}
+  .filebar select{background:var(--panel-2); border:1px solid var(--line); color:var(--ink); font-family:var(--mono); font-size:12px; padding:6px 10px; border-radius:8px;}
+  button.btn{background:none;border:1px solid var(--line);color:var(--ink-dim);padding:7px 14px;border-radius:8px;font-family:var(--mono);font-size:12px;cursor:pointer;}
+  button.btn:hover{border-color:var(--ink-dim); color:var(--ink);}
+  button.btn.primary{border-color:var(--amber); color:var(--amber);}
+  button.btn.primary:hover{background:var(--amber); color:#0d1117;}
+
+  /* mode switch */
+  .modes{display:flex; gap:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:9px; padding:3px; font-family:var(--mono); font-size:12px;}
+  .modes button{background:none; border:none; color:var(--ink-dim); padding:6px 14px; border-radius:7px; cursor:pointer;}
+  .modes button.active{background:var(--amber); color:#0d1117; font-weight:600;}
+
+  .kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:22px;}
+  .kpi{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px;}
+  .kpi .n{font-family:var(--mono); font-size:26px; font-weight:700;}
+  .kpi .l{font-size:12px; color:var(--ink-dim); margin-top:4px;}
+  .kpi.amber .n{color:var(--amber);} .kpi.cyan .n{color:var(--cyan);} .kpi.violet .n{color:var(--violet);}
+
+  .grid2{display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:16px;}
+  @media(max-width:860px){.grid2{grid-template-columns:1fr;}}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px;}
+  .card h3{margin:0 0 14px; font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.6px; color:var(--ink-dim);}
+  .card canvas{max-height:280px;}
+
+  table{width:100%; border-collapse:collapse; font-size:12.5px; font-family:var(--mono);}
+  th,td{padding:7px 10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px;}
+  th{color:var(--ink-dim); font-weight:600; position:sticky; top:0; background:var(--panel);}
+  .tablewrap{max-height:340px; overflow:auto; border:1px solid var(--line); border-radius:8px;}
+  .empty{color:var(--ink-dim); font-family:var(--mono); font-size:12px; padding:20px 0; text-align:center;}
+
+  #compareSection{display:none; margin-top:16px;}
+  #exportRoot{padding:4px;}
+
+  /* builder */
+  #builder{display:none;}
+  .builder-bar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:18px;}
+  .builder-bar .field{display:flex; flex-direction:column; gap:4px;}
+  .builder-bar label{font-family:var(--mono); font-size:10.5px; color:var(--ink-dim); text-transform:uppercase; letter-spacing:.4px;}
+  .builder-bar select{background:var(--panel-2); border:1px solid var(--line); color:var(--ink); font-family:var(--mono); font-size:12.5px; padding:7px 10px; border-radius:8px; min-width:130px;}
+  .builder-bar button.add{margin-left:auto; align-self:flex-end;}
+
+  .widgets{display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:16px;}
+  .widget{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; position:relative;}
+  .widget .whead{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
+  .widget .wtitle{font-family:var(--mono); font-size:12px; color:var(--ink-dim);}
+  .widget .wclose{cursor:pointer; color:var(--ink-dim); font-family:var(--mono); font-size:13px;}
+  .widget .wclose:hover{color:var(--red);}
+  .widget canvas{max-height:260px;}
+  .widget .wtable{max-height:260px; overflow:auto;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div>
+        <h1>Визуализация данных</h1>
+      </div>
+    </div>
+  </header>
+
+  <div class="drop" id="drop">
+    <div class="scan" id="scan"></div>
+    <h2>Перетащите файлы сюда или нажмите, чтобы выбрать</h2>
+    <div class="types">
+      <span class="tag">.xlsx / .xls</span>
+      <span class="tag">.csv</span>
+      <span class="tag">.docx</span>
+      <span class="tag">.pdf</span>
+    </div>
+    <input type="file" id="file" accept=".xlsx,.xls,.csv,.docx,.pdf" multiple>
+  </div>
+  <div id="status"></div>
+  <div id="fileTabs"></div>
+
+  <div id="dash">
+    <div id="exportRoot">
+      <div class="filebar">
+        <div class="fname" id="fname"></div>
+        <div class="actions">
+          <select id="sheetSelect" style="display:none;"></select>
+          <div class="modes" id="modes" style="display:none;">
+            <button data-mode="auto" class="active">Авто</button>
+            <button data-mode="builder">Конструктор</button>
+          </div>
+          <button class="btn primary" id="exportPng">↓ PNG</button>
+          <button class="btn primary" id="exportPdf">↓ PDF</button>
+        </div>
+      </div>
+
+      <!-- AUTO MODE -->
+      <div id="autoView">
+        <div class="kpis" id="kpis"></div>
+        <div class="grid2">
+          <div class="card"><h3 id="chartTitle1">График</h3><canvas id="chart1"></canvas></div>
+          <div class="card"><h3 id="chartTitle2">Распределение</h3><canvas id="chart2"></canvas></div>
+        </div>
+        <div class="card">
+          <h3 id="tableTitle">Данные</h3>
+          <div class="tablewrap"><table id="table"></table></div>
+        </div>
+      </div>
+
+      <!-- BUILDER MODE (только для таблиц) -->
+      <div id="builder">
+        <div class="builder-bar">
+          <div class="field"><label>Ось X (категория)</label><select id="bX"></select></div>
+          <div class="field"><label>Метрика (Y)</label><select id="bY"></select></div>
+          <div class="field"><label>Агрегация</label>
+            <select id="bAgg">
+              <option value="sum">Сумма</option>
+              <option value="avg">Среднее</option>
+              <option value="count">Количество</option>
+              <option value="min">Минимум</option>
+              <option value="max">Максимум</option>
+            </select>
+          </div>
+          <div class="field"><label>Тип графика</label>
+            <select id="bType">
+              <option value="bar">Столбцы</option>
+              <option value="line">Линия</option>
+              <option value="pie">Круговая</option>
+              <option value="doughnut">Кольцевая</option>
+              <option value="scatter">Точки (X-Y числовые)</option>
+              <option value="table">Таблица (сводная)</option>
+            </select>
+          </div>
+          <button class="btn primary add" id="addWidget">+ добавить виджет</button>
+        </div>
+        <div class="widgets" id="widgets"></div>
+      </div>
+    </div>
+
+    <div id="compareSection" class="card">
+      <h3>Сравнение файлов</h3>
+      <canvas id="chartCompare"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+const statusEl = document.getElementById('status');
+const scanEl = document.getElementById('scan');
+const dash = document.getElementById('dash');
+const fileTabsEl = document.getElementById('fileTabs');
+const sheetSelect = document.getElementById('sheetSelect');
+const modesEl = document.getElementById('modes');
+const autoView = document.getElementById('autoView');
+const builderView = document.getElementById('builder');
+const widgetsEl = document.getElementById('widgets');
+const bX = document.getElementById('bX'), bY = document.getElementById('bY'), bAgg = document.getElementById('bAgg'), bType = document.getElementById('bType');
+const palette = ['#f2a541','#4fd1c5','#9d8cff','#ff6b6b','#6bc2ff','#ffd166'];
+let chart1, chart2, chartCompare;
+const widgetCharts = {}; // id -> Chart instance
+
+const files = [];
+let activeId = null;
+let currentMode = 'auto';
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('drag'); if (e.dataTransfer.files.length) [...e.dataTransfer.files].forEach(handleFile); });
+fileInput.addEventListener('change', e => { if (e.target.files.length) [...e.target.files].forEach(handleFile); fileInput.value=''; });
+
+modesEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if(!btn) return;
+  currentMode = btn.dataset.mode;
+  [...modesEl.children].forEach(b=>b.classList.toggle('active', b===btn));
+  autoView.style.display = currentMode==='auto' ? 'block' : 'none';
+  builderView.style.display = currentMode==='builder' ? 'block' : 'none';
+  if(currentMode==='builder') populateBuilderSelectors();
+});
+
+document.getElementById('addWidget').addEventListener('click', () => {
+  const f = getActive();
+  if(!f || f.kind !== 'sheet') return;
+  const widget = { id:'w'+Date.now()+Math.random().toString(36).slice(2,6), x:bX.value, y:bY.value, agg:bAgg.value, type:bType.value };
+  f.widgets = f.widgets || [];
+  f.widgets.push(widget);
+  renderWidgets(f);
+});
+
+function setStatus(msg){ statusEl.textContent = msg; }
+
+async function handleFile(file){
+  scanEl.classList.add('active');
+  setStatus('Читаю файл: ' + file.name + ' …');
+  try{
+    const ext = file.name.split('.').pop().toLowerCase();
+    const id = 'f' + Date.now() + Math.random().toString(36).slice(2,7);
+    let entry = { id, name: file.name, ext, widgets: [] };
+
+    if(ext === 'xlsx' || ext === 'xls' || ext === 'csv'){
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array'});
+      entry.kind = 'sheet';
+      entry.workbook = wb;
+      entry.activeSheet = wb.SheetNames[0];
+    } else if(ext === 'docx'){
+      const buf = await file.arrayBuffer();
+      const {value: html} = await mammoth.convertToHtml({arrayBuffer: buf});
+      const {value: text} = await mammoth.extractRawText({arrayBuffer: buf});
+      entry.kind = 'docx'; entry.html = html; entry.text = text;
+    } else if(ext === 'pdf'){
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+      let fullText = ''; const pageLens = []; const pageTexts = [];
+      for(let i=1;i<=pdf.numPages;i++){
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        const pageText = content.items.map(it=>it.str).join(' ');
+        fullText += pageText + '\n';
+        pageLens.push(pageText.split(/\s+/).filter(Boolean).length);
+        pageTexts.push(pageText);
+      }
+      entry.kind = 'pdf'; entry.numPages = pdf.numPages; entry.fullText = fullText; entry.pageLens = pageLens; entry.pageTexts = pageTexts;
+    } else {
+      setStatus('Формат не поддерживается: .' + ext);
+      scanEl.classList.remove('active');
+      return;
+    }
+
+    files.push(entry);
+    activeId = entry.id;
+    currentMode = 'auto';
+    [...modesEl.children].forEach(b=>b.classList.toggle('active', b.dataset.mode==='auto'));
+    autoView.style.display='block'; builderView.style.display='none';
+    renderTabs();
+    renderActive();
+    dash.style.display = 'block';
+    scanEl.classList.remove('active');
+    setStatus('Готово: ' + file.name);
+    updateCompare();
+  } catch(err){
+    console.error(err);
+    scanEl.classList.remove('active');
+    setStatus('Ошибка при разборе файла: ' + err.message);
+  }
+}
+
+function renderTabs(){
+  fileTabsEl.innerHTML = files.map(f => `
+    <div class="ftab ${f.id===activeId?'active':''}" data-id="${f.id}">
+      <span>${escapeHtml(f.name)}</span>
+      <span class="x" data-close="${f.id}">✕</span>
+    </div>`).join('') + `<div class="ftab addmore">+ добавить файл</div>`;
+
+  [...fileTabsEl.querySelectorAll('.ftab:not(.addmore)')].forEach(el=>{
+    el.addEventListener('click', (e)=>{ if(e.target.dataset.close) return; activeId = el.dataset.id; renderTabs(); renderActive(); });
+  });
+  [...fileTabsEl.querySelectorAll('.x')].forEach(el=>{
+    el.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const id = el.dataset.close;
+      const idx = files.findIndex(f=>f.id===id);
+      if(idx>-1) files.splice(idx,1);
+      if(activeId===id) activeId = files.length ? files[0].id : null;
+      renderTabs();
+      if(activeId){ renderActive(); } else { dash.style.display='none'; }
+      updateCompare();
+    });
+  });
+  const addEl = fileTabsEl.querySelector('.addmore');
+  if(addEl) addEl.addEventListener('click', ()=> fileInput.click());
+}
+
+function getActive(){ return files.find(f=>f.id===activeId); }
+
+function renderActive(){
+  const f = getActive();
+  if(!f) return;
+  document.getElementById('fname').innerHTML = escapeHtml(f.name);
+
+  modesEl.style.display = f.kind === 'sheet' ? 'flex' : 'none';
+  if(f.kind !== 'sheet'){
+    currentMode = 'auto';
+    autoView.style.display = 'block'; builderView.style.display = 'none';
+    [...modesEl.children].forEach(b=>b.classList.toggle('active', b.dataset.mode==='auto'));
+  }
+
+  if(f.kind === 'sheet'){
+    sheetSelect.style.display = f.workbook.SheetNames.length>1 ? 'inline-block' : 'none';
+    sheetSelect.innerHTML = f.workbook.SheetNames.map(n=>`<option value="${escapeHtml(n)}" ${n===f.activeSheet?'selected':''}>${escapeHtml(n)}</option>`).join('');
+    sheetSelect.onchange = () => { f.activeSheet = sheetSelect.value; f.widgets = []; renderSheet(f); if(currentMode==='builder') populateBuilderSelectors(); renderWidgets(f); updateCompare(); };
+    renderSheet(f);
+    if(currentMode==='builder'){ populateBuilderSelectors(); renderWidgets(f); }
+  } else {
+    sheetSelect.style.display = 'none';
+    if(f.kind === 'docx') renderDocx(f);
+    if(f.kind === 'pdf') renderPdf(f);
+  }
+}
+
+function kpi(container, items){
+  container.innerHTML = items.map((it,i) => `
+    <div class="kpi ${['amber','cyan','violet'][i%3]}">
+      <div class="n">${it.value}</div>
+      <div class="l">${it.label}</div>
+    </div>`).join('');
+}
+function destroyCharts(){ if(chart1){chart1.destroy();chart1=null;} if(chart2){chart2.destroy();chart2=null;} }
+
+function getSheetRowsCols(f){
+  const ws = f.workbook.Sheets[f.activeSheet];
+  const rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+  const cols = rows.length ? Object.keys(rows[0]) : [];
+  return {rows, cols};
+}
+
+/* ---------- AUTO: EXCEL/CSV ---------- */
+function renderSheet(f){
+  const {rows, cols} = getSheetRowsCols(f);
+  if(!rows.length){
+    kpi(document.getElementById('kpis'), [{value:0, label:'строк'}]);
+    destroyCharts(); renderTable([], []);
+    f.summary = { kpis:[{value:0,label:'строк'}] };
+    return;
+  }
+  const numericCols = cols.filter(c => rows.every(r => r[c]==='' || !isNaN(parseFloat(r[c]))) && rows.some(r => r[c]!==''));
+  const textCols = cols.filter(c => !numericCols.includes(c));
+
+  const kpis = [{value: rows.length, label:'строк'}, {value: cols.length, label:'столбцов'}];
+  if(numericCols.length){
+    const c = numericCols[0];
+    const vals = rows.map(r=>parseFloat(r[c])).filter(v=>!isNaN(v));
+    const sum = vals.reduce((a,b)=>a+b,0);
+    kpis.push({value: fmt(sum), label:'сумма «'+c+'»'});
+    kpis.push({value: fmt(sum/vals.length), label:'среднее «'+c+'»'});
+  }
+  kpi(document.getElementById('kpis'), kpis);
+  f.summary = { kpis, primaryMetric: numericCols[0] ? {label:numericCols[0], value: rows.reduce((a,r)=>a+(parseFloat(r[numericCols[0]])||0),0)} : {label:'строк', value: rows.length} };
+
+  destroyCharts();
+  const ctx1 = document.getElementById('chart1').getContext('2d');
+  const ctx2 = document.getElementById('chart2').getContext('2d');
+
+  if(numericCols.length && textCols.length){
+    const cat = textCols[0], val = numericCols[0];
+    const top = rows.slice(0,15);
+    document.getElementById('chartTitle1').textContent = val + ' по ' + cat;
+    chart1 = new Chart(ctx1, {type:'bar', data:{labels: top.map(r=>String(r[cat]).slice(0,14)), datasets:[{label:val, data: top.map(r=>parseFloat(r[val])||0), backgroundColor: palette[0]}]}, options: baseOpts()});
+    if(numericCols.length>1){
+      document.getElementById('chartTitle2').textContent = numericCols[1] + ' по ' + cat;
+      chart2 = new Chart(ctx2, {type:'line', data:{labels: top.map(r=>String(r[cat]).slice(0,14)), datasets:[{label:numericCols[1], data: top.map(r=>parseFloat(r[numericCols[1]])||0), borderColor: palette[1], backgroundColor: palette[1]+'33', fill:true, tension:.3}]}, options: baseOpts()});
+    } else {
+      const freq = {}; rows.forEach(r=>{ const k = String(r[cat]); freq[k]=(freq[k]||0)+1; });
+      const entries = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,8);
+      document.getElementById('chartTitle2').textContent = 'Частота значений «'+cat+'»';
+      chart2 = new Chart(ctx2, {type:'doughnut', data:{labels: entries.map(e=>e[0]), datasets:[{data: entries.map(e=>e[1]), backgroundColor: palette}]}, options: {responsive:true, plugins:{legend:{labels:{color:'#8b99b3', font:{size:10}}}}}});
+    }
+  } else if(numericCols.length){
+    document.getElementById('chartTitle1').textContent = numericCols[0];
+    chart1 = new Chart(ctx1, {type:'line', data:{labels: rows.map((_,i)=>i+1), datasets:[{label:numericCols[0], data: rows.map(r=>parseFloat(r[numericCols[0]])||0), borderColor: palette[0], backgroundColor:palette[0]+'33', fill:true}]}, options: baseOpts()});
+    document.getElementById('chartTitle2').textContent = '—';
+  } else {
+    document.getElementById('chartTitle1').textContent = 'Нет числовых данных';
+    document.getElementById('chartTitle2').textContent = '—';
+  }
+
+  document.getElementById('tableTitle').textContent = 'Предпросмотр: ' + f.activeSheet + ' (' + rows.length + ' строк)';
+  renderTable(cols, rows.slice(0,200));
+}
+
+/* ---------- BUILDER (ручной, Power BI-стиль) ---------- */
+function populateBuilderSelectors(){
+  const f = getActive();
+  if(!f || f.kind !== 'sheet') return;
+  const {cols} = getSheetRowsCols(f);
+  const opts = cols.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+  bX.innerHTML = opts;
+  bY.innerHTML = '<option value="__count__">(количество строк)</option>' + opts;
+}
+
+function aggregate(rows, xCol, yCol, agg){
+  const groups = {};
+  rows.forEach(r=>{
+    const key = String(r[xCol] ?? '—');
+    if(!groups[key]) groups[key] = [];
+    const raw = yCol === '__count__' ? 1 : parseFloat(r[yCol]);
+    if(yCol === '__count__' || !isNaN(raw)) groups[key].push(raw);
+  });
+  const labels = Object.keys(groups);
+  const values = labels.map(k=>{
+    const vals = groups[k];
+    if(!vals.length) return 0;
+    if(agg==='sum') return vals.reduce((a,b)=>a+b,0);
+    if(agg==='avg') return vals.reduce((a,b)=>a+b,0)/vals.length;
+    if(agg==='count') return vals.length;
+    if(agg==='min') return Math.min(...vals);
+    if(agg==='max') return Math.max(...vals);
+    return 0;
+  });
+  // sort desc by value, cap to 20 categories for readability
+  const paired = labels.map((l,i)=>({l, v:values[i]})).sort((a,b)=>b.v-a.v).slice(0,20);
+  return { labels: paired.map(p=>p.l), values: paired.map(p=>p.v) };
+}
+
+function renderWidgets(f){
+  widgetsEl.innerHTML = '';
+  Object.keys(widgetCharts).forEach(id=>{ if(widgetCharts[id]){widgetCharts[id].destroy(); delete widgetCharts[id];} });
+  if(!f.widgets || !f.widgets.length){
+    widgetsEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">Пока нет виджетов — выберите оси и нажмите «добавить виджет»</div>';
+    return;
+  }
+  const {rows} = getSheetRowsCols(f);
+  f.widgets.forEach(w=>{
+    const card = document.createElement('div');
+    card.className = 'widget';
+    const aggLabel = {sum:'Сумма', avg:'Среднее', count:'Количество', min:'Минимум', max:'Максимум'}[w.agg];
+    const yLabel = w.y === '__count__' ? 'строк' : w.y;
+    card.innerHTML = `<div class="whead"><span class="wtitle">${aggLabel} «${escapeHtml(yLabel)}» по «${escapeHtml(w.x)}» — ${w.type}</span><span class="wclose" data-id="${w.id}">✕</span></div>`;
+
+    if(w.type === 'table'){
+      const {labels, values} = aggregate(rows, w.x, w.y, w.agg);
+      const div = document.createElement('div'); div.className='wtable';
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<tr><th>'+escapeHtml(w.x)+'</th><th>'+escapeHtml(aggLabel)+'</th></tr>' +
+        labels.map((l,i)=>`<tr><td>${escapeHtml(l)}</td><td>${fmt(values[i])}</td></tr>`).join('');
+      div.appendChild(tbl); card.appendChild(div);
+    } else if(w.type === 'scatter'){
+      const canvas = document.createElement('canvas'); card.appendChild(canvas);
+      const pts = rows.map(r=>({x: parseFloat(r[w.x]), y: parseFloat(r[w.y])})).filter(p=>!isNaN(p.x) && !isNaN(p.y)).slice(0,300);
+      widgetCharts[w.id] = new Chart(canvas.getContext('2d'), {type:'scatter', data:{datasets:[{label: w.x+' vs '+w.y, data: pts, backgroundColor: palette[0]}]}, options: baseOpts()});
+    } else {
+      const canvas = document.createElement('canvas'); card.appendChild(canvas);
+      const {labels, values} = aggregate(rows, w.x, w.y, w.agg);
+      const opts = (w.type==='pie'||w.type==='doughnut') ? {responsive:true, plugins:{legend:{labels:{color:'#8b99b3', font:{size:10}}}}} : baseOpts();
+      widgetCharts[w.id] = new Chart(canvas.getContext('2d'), {type:w.type, data:{labels, datasets:[{label: yLabel, data: values, backgroundColor: (w.type==='pie'||w.type==='doughnut') ? palette : palette[0], borderColor: palette[1], fill: w.type==='line'}]}, options: opts});
+    }
+    widgetsEl.appendChild(card);
+  });
+  [...widgetsEl.querySelectorAll('.wclose')].forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const id = el.dataset.id;
+      if(widgetCharts[id]){ widgetCharts[id].destroy(); delete widgetCharts[id]; }
+      f.widgets = f.widgets.filter(w=>w.id!==id);
+      renderWidgets(f);
+    });
+  });
+}
+
+/* ---------- DOCX ---------- */
+function renderDocx(f){
+  const div = document.createElement('div'); div.innerHTML = f.html;
+  const tables = div.querySelectorAll('table');
+  const words = f.text.trim().split(/\s+/).filter(Boolean);
+  const paragraphs = f.text.split(/\n+/).filter(p=>p.trim().length>0);
+  const kpis = [{value: words.length, label:'слов'},{value: paragraphs.length, label:'абзацев'},{value: tables.length, label:'таблиц'},{value: Math.round(words.length/200)||1, label:'мин. чтения'}];
+  kpi(document.getElementById('kpis'), kpis);
+  f.summary = { kpis, primaryMetric: {label:'слов', value: words.length} };
+
+  destroyCharts();
+  const stop = new Set(['и','в','не','на','с','что','как','а','по','это','к','для','из','за','от','но','или','до','же','о','то','у','я','мы','вы','он','она','они']);
+  const freq = {}; words.forEach(w=>{ const k=w.toLowerCase().replace(/[^а-яa-zё0-9]/gi,''); if(k.length>3 && !stop.has(k)) freq[k]=(freq[k]||0)+1; });
+  const top = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  document.getElementById('chartTitle1').textContent = 'Частые слова';
+  chart1 = new Chart(document.getElementById('chart1').getContext('2d'), {type:'bar', data:{labels: top.map(t=>t[0]), datasets:[{label:'встречаемость', data: top.map(t=>t[1]), backgroundColor: palette[2]}]}, options: {...baseOpts(), indexAxis:'y'}});
+  document.getElementById('chartTitle2').textContent = 'Длина абзацев (слов)';
+  const parLens = paragraphs.slice(0,20).map(p=>p.split(/\s+/).filter(Boolean).length);
+  chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {type:'line', data:{labels: parLens.map((_,i)=>i+1), datasets:[{label:'слов в абзаце', data: parLens, borderColor: palette[3], backgroundColor: palette[3]+'33', fill:true, tension:.25}]}, options: baseOpts()});
+  document.getElementById('tableTitle').textContent = tables.length ? 'Первая таблица из документа' : 'Текст документа (фрагмент)';
+  if(tables.length){
+    const t = tables[0];
+    const rows = [...t.querySelectorAll('tr')].map(tr=>[...tr.querySelectorAll('td,th')].map(td=>td.textContent.trim()));
+    if(rows.length) renderTable(rows[0], rows.slice(1).map(r=>Object.fromEntries(rows[0].map((h,i)=>[h,r[i]||'']))));
+  } else {
+    const previewRows = paragraphs.slice(0,50).map((p,i)=>({'#': i+1, 'Текст': p.slice(0,180)}));
+    renderTable(['#','Текст'], previewRows);
+  }
+}
+
+/* ---------- PDF ---------- */
+function renderPdf(f){
+  const words = f.fullText.trim().split(/\s+/).filter(Boolean);
+  const kpis = [{value: f.numPages, label:'страниц'},{value: words.length, label:'слов'},{value: Math.round(words.length/f.numPages)||0, label:'слов/стр. в среднем'},{value: Math.round(words.length/200)||1, label:'мин. чтения'}];
+  kpi(document.getElementById('kpis'), kpis);
+  f.summary = { kpis, primaryMetric: {label:'слов', value: words.length} };
+
+  destroyCharts();
+  document.getElementById('chartTitle1').textContent = 'Слов на странице';
+  chart1 = new Chart(document.getElementById('chart1').getContext('2d'), {type:'bar', data:{labels: f.pageLens.map((_,i)=>'стр. '+(i+1)), datasets:[{label:'слов', data: f.pageLens, backgroundColor: palette[4]}]}, options: baseOpts()});
+  const stop = new Set(['и','в','не','на','с','что','как','а','по','это','к','для','из','за','от','но','или','до','же','о','то','у','the','and','of','to','in','a','is','for','on']);
+  const freq = {}; words.forEach(w=>{ const k=w.toLowerCase().replace(/[^а-яa-zё0-9]/gi,''); if(k.length>3 && !stop.has(k)) freq[k]=(freq[k]||0)+1; });
+  const top = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  document.getElementById('chartTitle2').textContent = 'Ключевые слова';
+  chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {type:'doughnut', data:{labels: top.map(t=>t[0]), datasets:[{data: top.map(t=>t[1]), backgroundColor: palette}]}, options: {responsive:true, plugins:{legend:{labels:{color:'#8b99b3', font:{size:10}}}}}});
+  document.getElementById('tableTitle').textContent = 'Текст по страницам (фрагмент)';
+  const rows = f.pageTexts.slice(0,50).map((t,i)=>({'Страница': i+1, 'Фрагмент текста': t.slice(0,180)}));
+  renderTable(['Страница','Фрагмент текста'], rows);
+}
+
+/* ---------- comparison ---------- */
+function updateCompare(){
+  const section = document.getElementById('compareSection');
+  if(files.length < 2){ section.style.display='none'; if(chartCompare){chartCompare.destroy(); chartCompare=null;} return; }
+  section.style.display = 'block';
+  files.forEach(f=>{
+    if(f.summary) return;
+    if(f.kind==='sheet'){
+      const {rows, cols} = getSheetRowsCols(f);
+      const numericCols = cols.filter(c => rows.every(r => r[c]==='' || !isNaN(parseFloat(r[c]))) && rows.some(r => r[c]!==''));
+      f.summary = { primaryMetric: numericCols[0] ? {label:numericCols[0], value: rows.reduce((a,r)=>a+(parseFloat(r[numericCols[0]])||0),0)} : {label:'строк', value: rows.length} };
+    } else if(f.kind==='docx'){
+      const words = f.text.trim().split(/\s+/).filter(Boolean);
+      f.summary = { primaryMetric: {label:'слов', value: words.length} };
+    } else if(f.kind==='pdf'){
+      const words = f.fullText.trim().split(/\s+/).filter(Boolean);
+      f.summary = { primaryMetric: {label:'слов', value: words.length} };
+    }
+  });
+  if(chartCompare){ chartCompare.destroy(); chartCompare=null; }
+  const ctx = document.getElementById('chartCompare').getContext('2d');
+  chartCompare = new Chart(ctx, { type:'bar', data:{ labels: files.map(f=>f.name.length>18? f.name.slice(0,16)+'…' : f.name), datasets:[{ label: 'Ключевая метрика (' + (files[0].summary?.primaryMetric?.label || '') + ' и аналоги)', data: files.map(f=>f.summary?.primaryMetric?.value || 0), backgroundColor: files.map((_,i)=>palette[i % palette.length]) }] }, options: baseOpts() });
+}
+
+/* ---------- export ---------- */
+document.getElementById('exportPng').addEventListener('click', async () => {
+  setStatus('Готовлю PNG…');
+  const canvas = await html2canvas(document.getElementById('exportRoot'), {backgroundColor:'#0d1117', scale:2});
+  const link = document.createElement('a'); link.download = 'дашборд.png'; link.href = canvas.toDataURL('image/png'); link.click();
+  setStatus('PNG сохранён');
+});
+document.getElementById('exportPdf').addEventListener('click', async () => {
+  setStatus('Готовлю PDF…');
+  const canvas = await html2canvas(document.getElementById('exportRoot'), {backgroundColor:'#0d1117', scale:2});
+  const imgData = canvas.toDataURL('image/png');
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({ orientation: canvas.width > canvas.height ? 'l' : 'p', unit:'px', format:[canvas.width, canvas.height] });
+  pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+  pdf.save('дашборд.pdf');
+  setStatus('PDF сохранён');
+});
+
+/* ---------- helpers ---------- */
+function renderTable(cols, rows){
+  const table = document.getElementById('table');
+  if(!rows.length){ table.innerHTML = '<tr><td class="empty">Нет данных для отображения</td></tr>'; return; }
+  const thead = '<tr>' + cols.map(c=>`<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
+  const tbody = rows.map(r => '<tr>' + cols.map(c=>`<td>${escapeHtml(String(r[c]??''))}</td>`).join('') + '</tr>').join('');
+  table.innerHTML = thead + tbody;
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function fmt(n){ if(typeof n !== 'number' || isNaN(n)) return '0'; return Math.abs(n) >= 1000 ? n.toLocaleString('ru-RU', {maximumFractionDigits:1}) : (Math.round(n*100)/100).toString(); }
+function baseOpts(){
+  return { responsive:true, plugins:{ legend:{ labels:{ color:'#8b99b3', font:{size:11} } } }, scales:{ x:{ ticks:{ color:'#8b99b3', font:{size:10} }, grid:{ color:'#253046' } }, y:{ ticks:{ color:'#8b99b3', font:{size:10} }, grid:{ color:'#253046' } } } };
+}
+</script>
+</body>
+</html>

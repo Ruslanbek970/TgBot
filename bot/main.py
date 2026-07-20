@@ -1,68 +1,124 @@
 from __future__ import annotations
 
+import collections
+import json
 import os
+import sys
 import tempfile
 import time
 import traceback
-import subprocess
-import json
-import collections
 
+import google.generativeai as genai
 import telebot
 from telebot import types
-import google.generativeai as genai
 
-from bot.config import BOT_TOKEN, MAX_DOWNLOAD_MB, MAX_SEND_MB, GEMINI_API_KEY
-from converter import convert, ConverterError
-from converter.utils import cleanup, get_extension
-from storage import find_documents, list_companies, create_company, save_document, delete_company, list_files, delete_file, get_document
+from bot.config import BOT_TOKEN, GEMINI_API_KEY, MAX_DOWNLOAD_MB, MAX_SEND_MB
+from converter import convert
+from converter.utils import get_extension
+from storage import (
+    create_company,
+    delete_company,
+    delete_file,
+    find_documents,
+    get_document,
+    list_companies,
+    list_files,
+    save_document,
+)
+from storage.zip_utils import extract_zip, is_supported_file, validate_zip
 
 if not BOT_TOKEN:
-    raise SystemExit("Не задан BOT_TOKEN.")
+    raise SystemExit("\u041d\u0435 \u0437\u0430\u0434\u0430\u043d BOT_TOKEN.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
 telebot.apihelper.CONNECT_TIMEOUT = 30
 telebot.apihelper.READ_TIMEOUT = 60
 
+COMMON_DOCUMENTS_COMPANY = "Common"
 user_history = collections.defaultdict(lambda: collections.deque(maxlen=5))
 pending_file_company: dict[int, str] = {}
 
 try:
     with open("tools.json", "r", encoding="utf-8") as f:
         TOOLS_DEF = json.load(f)
-except Exception as e:
-    print(f"Error loading tools.json: {e}")
+except Exception as exc:
+    print(f"Error loading tools.json: {exc}")
     TOOLS_DEF = []
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+
 
 def _redact(text: str) -> str:
     if BOT_TOKEN and BOT_TOKEN in text:
         return text.replace(BOT_TOKEN, "<TOKEN>")
     return text
 
-def _send_document_with_retry(chat_id, path, retries=3, delay=2, visible_file_name=None):
-    last_exc = None
+
+def _log(message: str, level: str = "INFO") -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [{level}] {message}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+
+def _cleanup_temp_file(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        parent = os.path.dirname(path)
+        if parent and os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+    except Exception as exc:
+        _log(f"Temporary cleanup failed for {path}: {exc}", "DEBUG")
+
+
+def _send_document_with_retry(
+    chat_id: int,
+    path: str,
+    retries: int = 3,
+    delay: int = 2,
+    visible_file_name: str | None = None,
+) -> None:
+    last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
             with open(path, "rb") as f:
-                bot.send_document(chat_id, f, visible_file_name=visible_file_name or os.path.basename(path))
+                bot.send_document(
+                    chat_id,
+                    f,
+                    visible_file_name=visible_file_name or os.path.basename(path),
+                )
             return
         except Exception as exc:
             last_exc = exc
             if attempt < retries:
                 time.sleep(delay)
-    raise last_exc
+    if last_exc:
+        raise last_exc
 
-def _send_company_documents(chat_id, company: str) -> bool:
-    docs = [path for path in find_documents(company) if not path.endswith(".meta.txt")]
+
+def _send_found_documents(chat_id: int, query: str) -> bool:
+    docs = [path for path in find_documents(query) if not path.endswith(".meta.txt")]
     if not docs:
         return False
-    for path in docs:
+
+    sent = 0
+    for path in docs[:20]:
+        if not os.path.isfile(path):
+            continue
+        if os.path.getsize(path) > MAX_SEND_MB * 1024 * 1024:
+            bot.send_message(chat_id, f"\u0424\u0430\u0439\u043b \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0431\u043e\u043b\u044c\u0448\u043e\u0439: {os.path.basename(path)}")
+            continue
         _send_document_with_retry(chat_id, path)
-    return True
+        sent += 1
+
+    if len(docs) > 20:
+        bot.send_message(chat_id, f"\u041f\u043e\u043a\u0430\u0437\u0430\u043d\u044b \u043f\u0435\u0440\u0432\u044b\u0435 20 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u043e\u0432 \u0438\u0437 {len(docs)}.")
+    return sent > 0
+
 
 def _parse_company_and_file(text: str) -> tuple[str, str] | None:
     value = text.strip()
@@ -82,141 +138,134 @@ def _parse_company_and_file(text: str) -> tuple[str, str] | None:
         return parts[0], parts[1].strip()
     return None
 
+
 def get_main_keyboard() -> types.ReplyKeyboardMarkup:
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        types.KeyboardButton("🏢 Список компаний"),
-        types.KeyboardButton("❓ Помощь")
+        types.KeyboardButton("\u2753 \u041f\u043e\u043c\u043e\u0449\u044c"),
+        types.KeyboardButton("\U0001f4c4 \u041c\u043e\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b"),
     )
     return markup
+
 
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     help_text = (
-        "👋 *Привет!*\n"
-        "Я AI-бот помощник.\n\n"
-        "🛠 *Доступные команды:*\n"
-        "• `/create_company <имя>` — Создать компанию\n"
-        "• `/delete_company <имя>` — Удалить компанию\n"
-        "• `/list_companies` — Список компаний\n"
-        "• `/list_files <компания>` — Список файлов компании\n"
-        "• `/add_file <компания>` — Добавить следующий отправленный файл в компанию\n"
-        "• `/download <компания> <имя_файла>` — Скачать файл\n"
-        "• `/delete_file <компания> <имя_файла>` — Удалить файл\n\n"
-        "🤖 *ИИ-режим:*\n"
-        "Ты можешь просто писать мне текстом (например, «Удали компанию тексол»), "
-        "и я пойму тебя. Отправь мне документ, чтобы сконвертировать его (pdf/docx), "
-        "или подпиши файл `в <компания>`, чтобы сохранить его."
+        "\U0001f44b \u041f\u0440\u0438\u0432\u0435\u0442!\n\n"
+        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 \u0438\u043b\u0438 ZIP-\u0430\u0440\u0445\u0438\u0432 - "
+        "\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u044e \u0435\u0433\u043e \u0432 \u043e\u0431\u0449\u0435\u0435 \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435.\n"
+        "\u0418\u0441\u043a\u0430\u0442\u044c \u043c\u043e\u0436\u043d\u043e \u043e\u0431\u044b\u0447\u043d\u044b\u043c \u0442\u0435\u043a\u0441\u0442\u043e\u043c, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440:\n"
+        "\u00ab\u041f\u043e\u043a\u0430\u0436\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e \u0422\u041e\u041e \u0422\u0435\u043a\u0441\u043e\u043b \u0422\u0440\u0430\u043d\u0441\u00bb.\n\n"
+        "\u041a\u043e\u043c\u0430\u043d\u0434\u044b: /start, /help, /list_companies, /list_files <\u0437\u0430\u043f\u0440\u043e\u0441>."
     )
-    bot.reply_to(message, help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    bot.reply_to(message, help_text, reply_markup=get_main_keyboard())
 
-# --- Explicit CRUD Commands ---
 
 @bot.message_handler(commands=["create_company"])
 def cmd_create_company(message):
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return bot.reply_to(message, "Использование: /create_company <имя>")
-    if create_company(parts[1]): bot.reply_to(message, f"✅ Создана {parts[1]}")
-    else: bot.reply_to(message, "❌ Ошибка (уже существует?)")
+    if len(parts) < 2:
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /create_company <\u0438\u043c\u044f>")
+    if create_company(parts[1]):
+        bot.reply_to(message, f"\u2705 \u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f \u0441\u043e\u0437\u0434\u0430\u043d\u0430: {parts[1]}")
+    else:
+        bot.reply_to(message, "\u274c \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044e.")
+
 
 @bot.message_handler(commands=["delete_company"])
 def cmd_delete_company(message):
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return bot.reply_to(message, "Использование: /delete_company <имя>")
-    if delete_company(parts[1]): bot.reply_to(message, f"✅ Удалена {parts[1]}")
-    else: bot.reply_to(message, "❌ Не найдена")
+    if len(parts) < 2:
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /delete_company <\u0438\u043c\u044f>")
+    if delete_company(parts[1]):
+        bot.reply_to(message, f"\u2705 \u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f \u0443\u0434\u0430\u043b\u0435\u043d\u0430: {parts[1]}")
+    else:
+        bot.reply_to(message, "\u274c \u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.")
+
 
 @bot.message_handler(commands=["list_companies", "companies"])
 def cmd_list_companies(message):
-    comps = list_companies()
-    if not comps: return bot.reply_to(message, "Компаний нет.")
-    bot.reply_to(message, "Компании:\n" + "\n".join(comps))
+    companies = list_companies()
+    if not companies:
+        return bot.reply_to(message, "\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u0439 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442.")
+    bot.reply_to(message, "\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u0438:\n" + "\n".join(companies))
+
 
 @bot.message_handler(commands=["list_files"])
 def cmd_list_files(message):
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return bot.reply_to(message, "Использование: /list_files <компания>")
+    if len(parts) < 2:
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /list_files <\u0437\u0430\u043f\u0440\u043e\u0441>")
     files = list_files(parts[1])
-    if not files: return bot.reply_to(message, "Файлов нет.")
-    bot.reply_to(message, f"Файлы в {parts[1]}:\n" + "\n".join(files))
+    if not files:
+        return bot.reply_to(message, "\u0424\u0430\u0439\u043b\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.")
+    bot.reply_to(message, f"\u0424\u0430\u0439\u043b\u044b \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443 \"{parts[1]}\":\n" + "\n".join(files[:100]))
+
 
 @bot.message_handler(commands=["delete_file"])
 def cmd_delete_file(message):
     parts = message.text.split(maxsplit=2)
-    if len(parts) < 3: return bot.reply_to(message, "Использование: /delete_file <компания> <файл>")
-    if delete_file(parts[1], parts[2]): bot.reply_to(message, "✅ Файл удален.")
-    else: bot.reply_to(message, "❌ Файл не найден.")
+    if len(parts) < 3:
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /delete_file <\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f> <\u0444\u0430\u0439\u043b>")
+    if delete_file(parts[1], parts[2]):
+        bot.reply_to(message, "\u2705 \u0424\u0430\u0439\u043b \u0443\u0434\u0430\u043b\u0435\u043d.")
+    else:
+        bot.reply_to(message, "\u274c \u0424\u0430\u0439\u043b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.")
+
 
 @bot.message_handler(commands=["download"])
 def cmd_download(message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        return bot.reply_to(message, "Использование: /download <компания> <файл>")
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /download <\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f> <\u0444\u0430\u0439\u043b>")
 
     parsed = _parse_company_and_file(parts[1])
     if not parsed:
-        return bot.reply_to(message, "Использование: /download <компания> <файл>")
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /download <\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f> <\u0444\u0430\u0439\u043b>")
 
     company, filename = parsed
     document = get_document(company, filename)
     if not document:
-        return bot.reply_to(message, "❌ Файл не найден.")
+        return bot.reply_to(message, "\u274c \u0424\u0430\u0439\u043b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.")
 
     path, original_name = document
     if os.path.getsize(path) > MAX_SEND_MB * 1024 * 1024:
-        return bot.reply_to(message, "Файл слишком большой для отправки.")
-
+        return bot.reply_to(message, "\u0424\u0430\u0439\u043b \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0431\u043e\u043b\u044c\u0448\u043e\u0439 \u0434\u043b\u044f \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438.")
     _send_document_with_retry(message.chat.id, path, visible_file_name=original_name)
+
 
 @bot.message_handler(commands=["add_file"])
 def cmd_add_file(message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        return bot.reply_to(message, "Использование: /add_file <компания>")
+        return bot.reply_to(message, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /add_file <\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f>")
+    pending_file_company[message.chat.id] = parts[1].strip()
+    bot.reply_to(message, f"\u041e\u043a. \u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0444\u0430\u0439\u043b \u0441\u043e\u0445\u0440\u0430\u043d\u044e \u0432 \"{parts[1].strip()}\".")
 
-    company = parts[1].strip()
-    if not company:
-        return bot.reply_to(message, "Использование: /add_file <компания>")
-
-    pending_file_company[message.chat.id] = company
-    bot.reply_to(message, f"Ок. Отправь файл, я сохраню его в «{company}».")
-
-# --- Document Handling ---
 
 @bot.message_handler(content_types=["document", "photo"])
 def on_document(message):
+    _log(f"Received file from chat {message.chat.id}")
+
     is_photo = message.content_type == "photo"
     doc = message.photo[-1] if is_photo else message.document
     src_ext = "jpg" if is_photo else get_extension(doc.file_name or "")
     file_name = f"photo_{doc.file_id}.jpg" if is_photo else (doc.file_name or f"input.{src_ext or 'bin'}")
-    
     caption = (message.caption or "").strip()
     caption_lower = caption.lower()
-    
-    is_save_request = False
-    company_to_save = pending_file_company.pop(message.chat.id, "")
-    if company_to_save:
-        is_save_request = True
-
-    for prefix in ("store to ", "store ", "сохранить в ", "сохранить ", "в ", "save to ", "save "):
-        if caption_lower.startswith(prefix):
-            is_save_request = True
-            company_to_save = caption[len(prefix):].strip()
-            break
-
-    target = caption_lower.lstrip(".")
-    if not target and not is_save_request:
-        target = "docx" if src_ext == "pdf" else "pdf"
+    is_zip = file_name.lower().endswith(".zip")
 
     if doc.file_size and doc.file_size > MAX_DOWNLOAD_MB * 1024 * 1024:
-        return bot.reply_to(message, "Файл слишком большой.")
+        return bot.reply_to(message, "\u274c \u0424\u0430\u0439\u043b \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0431\u043e\u043b\u044c\u0448\u043e\u0439.")
 
-    if is_save_request and company_to_save:
-        bot.reply_to(message, f"💾 Сохраняю файл в «{company_to_save}»…")
-    else:
-        bot.reply_to(message, f"⚙️ Конвертирую {src_ext or '?'} → {target}…")
+    if not is_zip and not is_supported_file(file_name):
+        return bot.reply_to(
+            message,
+            "\u274c \u041d\u0435\u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0439 \u0444\u043e\u0440\u043c\u0430\u0442. "
+            "\u041f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u044e\u0442\u0441\u044f PDF, DOC/DOCX, TXT, XLS/XLSX, PPT/PPTX \u0438 \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f.",
+        )
 
-    src_path = out_path = None
+    src_path: str | None = None
     try:
         file_info = bot.get_file(doc.file_id)
         data = bot.download_file(file_info.file_path)
@@ -225,189 +274,144 @@ def on_document(message):
         with open(src_path, "wb") as f:
             f.write(data)
 
-        if is_save_request and company_to_save:
-            dest = save_document(company_to_save, src_path, file_name)
-            bot.reply_to(message, f"✅ Сохранён:\n`{os.path.basename(dest)}`", parse_mode="Markdown")
-            
-            # Gemini Metadata
-            if GEMINI_API_KEY:
+        if is_zip:
+            is_valid, validation_msg = validate_zip(src_path)
+            if not is_valid:
+                return bot.reply_to(message, f"\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u0430\u0440\u0445\u0438\u0432\u0430: {validation_msg}")
+
+            bot.reply_to(message, f"\U0001f4e6 {validation_msg}\n\u0420\u0430\u0441\u043f\u0430\u043a\u043e\u0432\u044b\u0432\u0430\u044e \u0438 \u0438\u043c\u043f\u043e\u0440\u0442\u0438\u0440\u0443\u044e...")
+            extracted_files = extract_zip(src_path)
+            if not extracted_files:
+                return bot.reply_to(message, "\u274c \u0412 \u0430\u0440\u0445\u0438\u0432\u0435 \u043d\u0435\u0442 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0445 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u043e\u0432.")
+
+            success_count = 0
+            failed_files: list[tuple[str, str]] = []
+            for original_name, file_path in extracted_files.items():
                 try:
-                    bot.send_message(message.chat.id, "🤖 Анализирую файл (AI Metadata)...")
-                    uploaded = genai.upload_file(path=src_path, display_name=file_name)
-                    model = genai.GenerativeModel("gemini-flash-latest")
-                    resp = model.generate_content([uploaded, "Опиши этот документ 1-2 предложениями."])
-                    meta_path = dest + ".meta.txt"
-                    with open(meta_path, "w", encoding="utf-8") as fmeta:
-                        fmeta.write(resp.text)
-                    bot.send_message(message.chat.id, f"📝 **Описание ИИ:**\n{resp.text}", parse_mode="Markdown")
-                except Exception as e:
-                    bot.send_message(message.chat.id, f"⚠️ Не удалось сгенерировать метаданные: {e}")
+                    save_document(COMMON_DOCUMENTS_COMPANY, file_path, original_name)
+                    success_count += 1
+                except Exception as exc:
+                    failed_files.append((original_name, str(exc)[:80]))
+
+            report = f"\u2705 \u0418\u043c\u043f\u043e\u0440\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043e: {success_count}/{len(extracted_files)}"
+            if failed_files:
+                report += f"\n\n\u041e\u0448\u0438\u0431\u043a\u0438 ({len(failed_files)}):"
+                for name, error in failed_files[:5]:
+                    report += f"\n- {name}: {error}"
+            return bot.reply_to(message, report)
+
+        company_to_save = pending_file_company.pop(message.chat.id, "")
+        for prefix in ("store to ", "store ", "\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 ", "\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c ", "\u0432 ", "save to ", "save "):
+            if caption_lower.startswith(prefix):
+                company_to_save = caption[len(prefix):].strip()
+                break
+
+        target = caption_lower.lstrip(".")
+        known_targets = {"pdf", "docx", "doc", "txt", "jpg", "jpeg", "png"}
+        if target and target in known_targets and not company_to_save:
+            bot.reply_to(message, f"\u2699\ufe0f \u041a\u043e\u043d\u0432\u0435\u0440\u0442\u0438\u0440\u0443\u044e {src_ext or '?'} -> {target}...")
+            out_path = convert(src_path, target)
+            try:
+                if os.path.getsize(out_path) > MAX_SEND_MB * 1024 * 1024:
+                    return bot.reply_to(message, "\u274c \u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0431\u043e\u043b\u044c\u0448\u043e\u0439.")
+                _send_document_with_retry(message.chat.id, out_path)
+            finally:
+                _cleanup_temp_file(out_path)
             return
 
-        out_path = convert(src_path, target)
-        if os.path.getsize(out_path) > MAX_SEND_MB * 1024 * 1024:
-            return bot.reply_to(message, "Результат слишком большой.")
-        _send_document_with_retry(message.chat.id, out_path)
+        company = company_to_save or COMMON_DOCUMENTS_COMPANY
+        save_document(company, src_path, file_name)
+        if company == COMMON_DOCUMENTS_COMPANY:
+            bot.reply_to(message, f"\u2705 \u0424\u0430\u0439\u043b \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d:\n`{file_name}`", parse_mode="Markdown")
+        else:
+            bot.reply_to(message, f"\u2705 \u0424\u0430\u0439\u043b \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d \u0432 \"{company}\":\n`{file_name}`", parse_mode="Markdown")
 
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+    except Exception as exc:
+        error_msg = _redact(str(exc))[:200]
+        _log(f"File processing error: {error_msg}\n{traceback.format_exc()[-500:]}", "ERROR")
+        bot.reply_to(message, f"\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438: {error_msg}")
     finally:
-        cleanup(src_path, out_path)
-        if src_path: cleanup(os.path.dirname(src_path))
-        if out_path: cleanup(os.path.dirname(out_path))
+        _cleanup_temp_file(src_path)
 
-# --- AI Text Routing ---
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("save_to_"))
+def handle_document_classification(call):
+    bot.answer_callback_query(call.id, "\u0424\u0430\u0439\u043b\u044b \u0442\u0435\u043f\u0435\u0440\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u0430\u0439\u043b \u0437\u0430\u043d\u043e\u0432\u043e.")
+
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(message):
     text = message.text.strip()
     low = text.lower()
-    
-    if low in ("❓ помощь", "помощь", "🏢 список компаний", "список компаний"):
-        if "список" in low: cmd_list_companies(message)
-        else: cmd_start(message)
+
+    if low in ("\u2753 \u043f\u043e\u043c\u043e\u0449\u044c", "\u043f\u043e\u043c\u043e\u0449\u044c", "help", "/help"):
+        cmd_start(message)
+        return
+
+    if low in ("\U0001f4c4 \u043c\u043e\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b", "\u043c\u043e\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b"):
+        if _send_found_documents(message.chat.id, COMMON_DOCUMENTS_COMPANY):
+            bot.reply_to(message, "\u041f\u043e\u043a\u0430\u0437\u0430\u043b \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u0438\u0437 \u043e\u0431\u0449\u0435\u0433\u043e \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0430.")
+        else:
+            bot.reply_to(message, "\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.")
+        return
+
+    search_words = (
+        "\u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442", "\u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b",
+        "\u0444\u0430\u0439\u043b", "\u0444\u0430\u0439\u043b\u044b", "\u043f\u043e\u043a\u0430\u0436\u0438", "\u043d\u0430\u0439\u0434\u0438",
+        "show", "find", "documents", "files",
+    )
+    if any(word in low for word in search_words):
+        if _send_found_documents(message.chat.id, text):
+            bot.reply_to(message, "\u041d\u0430\u0448\u0435\u043b \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443.")
+        else:
+            bot.reply_to(message, "\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.")
         return
 
     if not GEMINI_API_KEY:
-        # Manual fallback when Gemini is not configured.
-        if low in ("список компаний", "компании", "list companies"):
-            cmd_list_companies(message)
-            return
-
-        for prefix in ("создай компанию ", "создать компанию ", "create company "):
-            if low.startswith(prefix):
-                name = text[len(prefix):].strip()
-                if create_company(name):
-                    bot.reply_to(message, f"✅ Создана {name}")
-                else:
-                    bot.reply_to(message, "❌ Ошибка (уже существует?)")
-                return
-
-        for prefix in ("удали компанию ", "удалить компанию ", "delete company "):
-            if low.startswith(prefix):
-                name = text[len(prefix):].strip()
-                if delete_company(name):
-                    bot.reply_to(message, f"✅ Удалена {name}")
-                else:
-                    bot.reply_to(message, "❌ Не найдена")
-                return
-
-        for prefix in ("файлы ", "документы ", "документы по ", "files ", "documents "):
-            if low.startswith(prefix):
-                query = text[len(prefix):].strip()
-                if _send_company_documents(message.chat.id, query):
-                    bot.reply_to(message, f"Нашел документы для «{query}».")
-                else:
-                    bot.reply_to(message, "Документы не найдены.")
-                return
-
-        if low.startswith("документы по"):
-            query = text[len("документы по"):].strip()
-            if _send_company_documents(message.chat.id, query):
-                bot.reply_to(message, "Нашел:")
-            else:
-                bot.reply_to(message, "Документы не найдены.")
-            return
-
         bot.reply_to(
             message,
-            "Gemini API key не задан. Работают команды /create_company, "
-            "/list_companies, /list_files, /delete_file и сохранение файла "
-            "с подписью `save to <компания>`.",
-            parse_mode="Markdown",
+            "\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u043e\u0434\u0435 \"\u041f\u043e\u043a\u0430\u0436\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e \u0422\u0435\u043a\u0441\u043e\u043b \u0422\u0440\u0430\u043d\u0441\" "
+            "\u0438\u043b\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442/ZIP.",
         )
         return
 
-    history = user_history[message.chat.id]
-    
-    comp_list = list_companies()
-    companies_str = ", ".join(comp_list) if comp_list else "Пока нет компаний"
-    prompt = (
-        f"Ты умный AI-помощник. Существующие компании: {companies_str}.\n"
-        f"Твоя задача: выбрать нужный инструмент ИЛИ ответить текстом.\n"
-        f"Если пользователь ошибся в названии компании, исправь опечатку на существующую.\n"
-        f"Если пользователь просит файлы компании, выбери инструмент list_files.\n\n"
-        f"Инструменты:\n{json.dumps(TOOLS_DEF, ensure_ascii=False, indent=2)}\n\nИстория:\n"
-    )
-    for h in history: prompt += f"- {h}\n"
-    prompt += f"\nТекущий запрос: {text}\n\nВерни СТРОГО JSON формата: {{\"tool\": \"имя\", \"parameters\": {{\"k\":\"v\"}}}} ИЛИ {{\"reply\": \"ответ\"}}. Без Markdown блоков (без ```json)."
-
     try:
-        bot.send_chat_action(message.chat.id, 'typing')
+        bot.send_chat_action(message.chat.id, "typing")
+        companies = ", ".join(list_companies()) or "no companies"
+        prompt = (
+            "You are a Telegram document-search assistant. "
+            f"Companies: {companies}. "
+            "If the user asks for documents/files, return strict JSON "
+            "{\"tool\":\"find_documents\",\"parameters\":{\"query\":\"...\"}}. "
+            "Otherwise return strict JSON {\"reply\":\"...\"}. "
+            f"User request: {text}"
+        )
         model = genai.GenerativeModel("gemini-flash-latest")
         resp = model.generate_content(prompt)
         raw = resp.text.strip()
-        if raw.startswith("```json"): raw = raw[7:-3].strip()
-        elif raw.startswith("```"): raw = raw[3:-3].strip()
-        
+        if raw.startswith("```json"):
+            raw = raw[7:-3].strip()
+        elif raw.startswith("```"):
+            raw = raw[3:-3].strip()
+
         data = json.loads(raw)
-        history.append(f"User: {text}")
-        
-        if "reply" in data:
-            reply = data["reply"]
-            history.append(f"Bot: {reply}")
-            bot.reply_to(message, reply)
-            return
-            
-        tool_name = data.get("tool")
-        params = data.get("parameters", {})
-        
-        tool = next((t for t in TOOLS_DEF if t["name"] == tool_name), None)
-        if not tool:
-            bot.reply_to(message, f"❌ ИИ выбрал неизвестный инструмент: {tool_name}")
-            return
-            
-        cmd = []
-        for c in tool["command"]:
-            try: cmd.append(c.format(**params))
-            except: cmd.append(c)
-            
-        res = subprocess.run(cmd, capture_output=True, text=True, cwd="/app")
-        
-        if res.returncode == 0:
-            out_data = json.loads(res.stdout)
-            
-            if tool_name == "list_files":
-                comp = params.get("company_name", "")
-                docs = find_documents(comp)
-                if docs:
-                    reply_text = f"📂 Документы компании '{comp}':"
-                    bot.reply_to(message, reply_text)
-                    for f in docs:
-                        if not f.endswith(".meta.txt"):
-                            try: _send_document_with_retry(message.chat.id, f)
-                            except Exception as e: print("Fail send", e)
-                    history.append(f"Bot: Отправлены файлы компании {comp}")
-                    return
-                else:
-                    reply_text = f"🤷‍♂️ В компании '{comp}' файлы не найдены."
-            elif tool_name == "create_company":
-                if out_data.get("success"): reply_text = f"✅ Компания '{params.get('company_name')}' успешно создана!"
-                else: reply_text = f"❌ Ошибка создания: {out_data.get('error')}"
-            elif tool_name == "delete_company":
-                if out_data.get("success"): reply_text = f"🗑 Компания '{params.get('company_name')}' удалена."
-                else: reply_text = f"❌ Не удалось удалить: {out_data.get('error')}"
-            elif tool_name == "delete_file":
-                if out_data.get("success"): reply_text = f"🗑 Файл '{params.get('file_name')}' удален."
-                else: reply_text = f"❌ Ошибка удаления: {out_data.get('error')}"
-            elif tool_name == "list_companies":
-                comps = out_data.get("companies", [])
-                if comps: reply_text = "🏢 Существующие компании:\n" + "\n".join(f"- {c}" for c in comps)
-                else: reply_text = "🤷‍♂️ Компаний пока нет."
+        if data.get("tool") == "find_documents":
+            query = data.get("parameters", {}).get("query", text)
+            if _send_found_documents(message.chat.id, query):
+                bot.reply_to(message, "\u041d\u0430\u0448\u0435\u043b \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443.")
             else:
-                reply_text = f"✅ Инструмент {tool_name} выполнен успешно."
-        else:
-            reply_text = f"❌ Системная ошибка."
-            
-        history.append(f"Bot: {reply_text}")
-        bot.reply_to(message, reply_text)
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка ИИ: {e}\n{traceback.format_exc()[-200:]}")
+                bot.reply_to(message, "\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.")
+            return
+
+        bot.reply_to(message, data.get("reply", "\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u0437\u0430\u043f\u0440\u043e\u0441. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043d\u0430\u043f\u0438\u0441\u0430\u0442\u044c \u043f\u0440\u043e\u0449\u0435."))
+    except Exception as exc:
+        bot.reply_to(message, f"\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u0418\u0418: {exc}")
+
 
 def run():
-    print("Бот запущен. Ctrl+C — остановить.")
+    print("\u0411\u043e\u0442 \u0437\u0430\u043f\u0443\u0449\u0435\u043d. Ctrl+C - \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c.")
     bot.infinity_polling(skip_pending=True)
+
 
 if __name__ == "__main__":
     run()

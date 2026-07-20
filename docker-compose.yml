@@ -21,6 +21,8 @@ services:
     # BOT_TOKEN и (необязательно) SOFFICE_PATH берутся из файла .env
     env_file:
       - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
     depends_on:
       db:
         condition: service_healthy

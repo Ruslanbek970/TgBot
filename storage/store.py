@@ -138,6 +138,32 @@ def _norm(value: str) -> str:
     return (value or "").casefold().strip()
 
 
+SEARCH_STOPWORDS = {
+    "show", "find", "document", "documents", "file", "files", "for", "by",
+    "покажи", "показать", "найди", "найти", "документ", "документы",
+    "файл", "файлы", "мне", "по", "для", "про", "все", "всё",
+    "тоо", "ооо", "ао", "ип",
+}
+
+
+def _query_terms(query: str) -> list[str]:
+    cleaned = "".join(ch.casefold() if ch.isalnum() else " " for ch in query or "")
+    return [
+        part
+        for part in cleaned.split()
+        if len(part) > 2 and part not in SEARCH_STOPWORDS
+    ]
+
+
+def _matches_query(query_norm: str, terms: list[str], haystack: str) -> bool:
+    haystack_norm = haystack.casefold()
+    if query_norm and query_norm in haystack_norm:
+        return True
+    if not terms:
+        return False
+    return all(term in haystack_norm for term in terms)
+
+
 def _load_index() -> dict:
     if not INDEX_PATH.exists():
         return {"companies": {}, "documents": []}
@@ -235,10 +261,8 @@ def list_companies() -> list[str]:
 
 
 def save_document(company: str, temp_file_path: str, file_name: str) -> str:
-    company = _clean_name(company)
+    company = _clean_name(company) if company else ""
     file_name = _clean_name(file_name)
-    if not company:
-        raise ValueError("company is required")
     if not file_name:
         raise ValueError("file_name is required")
 
@@ -247,7 +271,8 @@ def save_document(company: str, temp_file_path: str, file_name: str) -> str:
         raise FileNotFoundError(temp_file_path)
 
     data = _load_index()
-    data["companies"].setdefault(_company_key(company), {"name": company})
+    if company:
+        data["companies"].setdefault(_company_key(company), {"name": company})
 
     file_id = uuid.uuid4().hex
     target = _secure_path(file_id)
@@ -257,7 +282,7 @@ def save_document(company: str, temp_file_path: str, file_name: str) -> str:
     data["documents"].append(
         {
             "id": file_id,
-            "company": company,
+            "company": company,  # Может быть пустой строкой для общих документов
             "original_name": file_name,
             "secure_path": str(target),
             "size": target.stat().st_size,
@@ -272,23 +297,41 @@ def find_documents(query: str) -> list[str]:
     if not query_norm:
         return []
 
+    from storage.fuzzy_search import find_best_company_match
+    terms = _query_terms(query)
+    
     data = _load_index()
     results: list[str] = []
     seen: set[str] = set()
+    
+    # Получить список всех компаний
+    companies = list_companies()
+    
+    # Попробовать fuzzy-поиск по компаниям
+    best_company = find_best_company_match(query, companies, threshold=70)
 
     for doc in data.get("documents", []):
         company = doc.get("company", "")
         name = doc.get("original_name", "")
         path = doc.get("secure_path", "")
-        haystack = f"{company} {name}".casefold()
-        if query_norm in haystack and path and os.path.isfile(path):
+        
+        # Проверка 1: точное совпадение в названии файла или компании
+        haystack = f"{company} {name}"
+        exact_match = _matches_query(query_norm, terms, haystack)
+        
+        # Проверка 2: нечеткое совпадение с компанией
+        fuzzy_match = best_company and _norm(company) == _norm(best_company)
+        
+        if (exact_match or fuzzy_match) and path and os.path.isfile(path):
             results.append(path)
             seen.add(os.path.abspath(path))
 
     for company, filename, path in _legacy_files():
-        haystack = f"{company} {filename}".casefold()
+        haystack = f"{company} {filename}"
         path_str = str(path)
-        if query_norm in haystack and os.path.abspath(path_str) not in seen:
+        exact_match = _matches_query(query_norm, terms, haystack)
+        fuzzy_match = best_company and _norm(company) == _norm(best_company)
+        if (exact_match or fuzzy_match) and os.path.abspath(path_str) not in seen:
             results.append(path_str)
 
     return results
@@ -494,6 +537,29 @@ def list_companies() -> list[str]:
     return sorted(name for name in names if name)
 
 
+def _resolve_company_name(query: str, threshold: int = 70) -> str:
+    query = (query or "").strip()
+    if not query:
+        return ""
+
+    companies = list_companies()
+    query_norm = _norm(query)
+    for company in companies:
+        if _norm(company) == query_norm:
+            return company
+
+    try:
+        from storage.fuzzy_search import find_best_company_match
+
+        match = find_best_company_match(query, companies, threshold=threshold)
+        if match:
+            return match
+    except Exception:
+        pass
+
+    return query
+
+
 def save_document(company: str, temp_file_path: str, file_name: str) -> str:
     company = _clean_name(company)
     file_name = _clean_name(file_name)
@@ -549,6 +615,7 @@ def find_documents(query: str) -> list[str]:
     if not query_norm:
         return []
 
+    terms = _query_terms(query)
     results: list[str] = []
     seen: set[str] = set()
 
@@ -576,6 +643,30 @@ def find_documents(query: str) -> list[str]:
         except Exception:
             pass
 
+        if terms:
+            try:
+                term_clauses = " AND ".join(
+                    ["lower(c.name || ' ' || d.original_name) LIKE %s"] * len(terms)
+                )
+                with get_cursor() as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT d.secure_path
+                        FROM storage_documents d
+                        JOIN storage_companies c ON c.id = d.company_id
+                        WHERE {term_clauses}
+                        ORDER BY d.created_at DESC;
+                        """,
+                        tuple(f"%{term}%" for term in terms),
+                    )
+                    for (path,) in cursor.fetchall():
+                        path_abs = os.path.abspath(path) if path else ""
+                        if path and os.path.isfile(path) and path_abs not in seen:
+                            results.append(path)
+                            seen.add(path_abs)
+            except Exception:
+                pass
+
     for path in _json_find_documents(query):
         path_abs = os.path.abspath(path)
         if path_abs not in seen:
@@ -585,7 +676,8 @@ def find_documents(query: str) -> list[str]:
 
 
 def list_files(company: str) -> list[str]:
-    company_norm = _norm(company)
+    resolved_company = _resolve_company_name(company)
+    company_norm = _norm(resolved_company)
     if not company_norm:
         return []
 
@@ -608,12 +700,13 @@ def list_files(company: str) -> list[str]:
         except Exception:
             pass
 
-    files.update(_json_list_files(company))
+    files.update(_json_list_files(resolved_company))
     return sorted(name for name in files if name)
 
 
 def delete_file(company: str, filename: str) -> bool:
-    company_norm = _norm(company)
+    resolved_company = _resolve_company_name(company)
+    company_norm = _norm(resolved_company)
     filename_norm = _norm(filename)
     if not company_norm or not filename_norm:
         return False
@@ -649,11 +742,12 @@ def delete_file(company: str, filename: str) -> bool:
         except Exception:
             pass
 
-    return _json_delete_file(company, filename) or deleted
+    return _json_delete_file(resolved_company, filename) or deleted
 
 
 def get_document(company: str, filename: str) -> tuple[str, str] | None:
-    company_norm = _norm(company)
+    resolved_company = _resolve_company_name(company)
+    company_norm = _norm(resolved_company)
     filename_norm = _norm(filename)
     if not company_norm or not filename_norm:
         return None
@@ -678,7 +772,7 @@ def get_document(company: str, filename: str) -> tuple[str, str] | None:
         except Exception:
             pass
 
-    return _json_get_document(company, filename)
+    return _json_get_document(resolved_company, filename)
 
 
 def delete_company(name: str) -> bool:
