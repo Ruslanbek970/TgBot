@@ -7,12 +7,23 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 
 import google.generativeai as genai
 import telebot
 from telebot import types
 
-from bot.config import BOT_TOKEN, GEMINI_API_KEY, MAX_DOWNLOAD_MB, MAX_SEND_MB
+from bot.config import (
+    AI_PROVIDER,
+    BOT_TOKEN,
+    GEMINI_API_KEY,
+    MAX_DOWNLOAD_MB,
+    MAX_SEND_MB,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OLLAMA_TIMEOUT_SEC,
+)
 from converter import convert
 from converter.utils import get_extension
 from storage import (
@@ -45,7 +56,7 @@ except Exception as exc:
     print(f"Error loading tools.json: {exc}")
     TOOLS_DEF = []
 
-if GEMINI_API_KEY:
+if AI_PROVIDER == "gemini" and GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
@@ -151,12 +162,25 @@ def get_main_keyboard() -> types.ReplyKeyboardMarkup:
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     help_text = (
-        "\U0001f44b \u041f\u0440\u0438\u0432\u0435\u0442!\n\n"
-        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 \u0438\u043b\u0438 ZIP-\u0430\u0440\u0445\u0438\u0432 - "
-        "\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u044e \u0435\u0433\u043e \u0432 \u043e\u0431\u0449\u0435\u0435 \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435.\n"
-        "\u0418\u0441\u043a\u0430\u0442\u044c \u043c\u043e\u0436\u043d\u043e \u043e\u0431\u044b\u0447\u043d\u044b\u043c \u0442\u0435\u043a\u0441\u0442\u043e\u043c, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440:\n"
-        "\u00ab\u041f\u043e\u043a\u0430\u0436\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e \u0422\u041e\u041e \u0422\u0435\u043a\u0441\u043e\u043b \u0422\u0440\u0430\u043d\u0441\u00bb.\n\n"
-        "\u041a\u043e\u043c\u0430\u043d\u0434\u044b: /start, /help, /list_companies, /list_files <\u0437\u0430\u043f\u0440\u043e\u0441>."
+        "👋 Привет! Я помогаю хранить, искать, скачивать и конвертировать документы.\n\n"
+        "📥 Как добавить файл\n"
+        "- Отправьте документ, фото или ZIP-архив - я сохраню его в общее хранилище.\n"
+        "- Чтобы сохранить в компанию, сначала напишите: /add_file <компания>\n"
+        "- Или прикрепите файл с подписью: сохранить в <компания>\n\n"
+        "🔄 Конвертация\n"
+        "- Прикрепите файл и укажите в подписи нужный формат: pdf, docx, doc, txt, jpg, jpeg или png.\n\n"
+        "🔎 Поиск\n"
+        "- Пишите обычным текстом, например: Покажи документы по ТОО Тексол Транс\n"
+        "- Кнопка \"📄 Мои документы\" покажет файлы из общего хранилища.\n\n"
+        "📋 Команды\n"
+        "/help - показать эту помощь\n"
+        "/create_company <имя> - создать компанию\n"
+        "/delete_company <имя> - удалить компанию\n"
+        "/list_companies - список компаний\n"
+        "/list_files <запрос> - список файлов по запросу\n"
+        "/download <компания> <файл> - скачать файл\n"
+        "/add_file <компания> - сохранить следующий файл в компанию\n"
+        "/delete_file <компания> <файл> - удалить файл"
     )
     bot.reply_to(message, help_text, reply_markup=get_main_keyboard())
 
@@ -339,6 +363,83 @@ def handle_document_classification(call):
     bot.answer_callback_query(call.id, "\u0424\u0430\u0439\u043b\u044b \u0442\u0435\u043f\u0435\u0440\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u0430\u0439\u043b \u0437\u0430\u043d\u043e\u0432\u043e.")
 
 
+def _ai_enabled() -> bool:
+    if AI_PROVIDER == "ollama":
+        return bool(OLLAMA_BASE_URL and OLLAMA_MODEL)
+    if AI_PROVIDER == "gemini":
+        return bool(GEMINI_API_KEY)
+    return False
+
+
+def _generate_ai_text(prompt: str) -> str:
+    if AI_PROVIDER == "ollama":
+        url = f"{OLLAMA_BASE_URL}/v1/chat/completions"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": """
+        Ты помощник по документообороту.
+
+        Всегда отвечай только валидным JSON.
+
+        Если нужно искать документы:
+
+        {"tool":"find_documents","parameters":{"query":"..."}}
+
+        Во всех остальных случаях:
+
+        {"reply":"..."}
+
+        Никогда не добавляй пояснений.
+        Никогда не используй Markdown.
+        Никогда не используй ```json.
+        """
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0,
+            "stream": False,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SEC) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Ollama недоступна: {exc}") from exc
+
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError("Ollama вернула пустой ответ")
+        return choices[0].get("message", {}).get("content", "").strip()
+
+    if AI_PROVIDER == "gemini":
+        model = genai.GenerativeModel("gemini-flash-latest")
+        resp = model.generate_content(prompt)
+        return resp.text.strip()
+
+    raise RuntimeError(f"Неизвестный AI_PROVIDER: {AI_PROVIDER}")
+
+
+def _strip_json_fence(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("```json"):
+        return raw[7:-3].strip()
+    if raw.startswith("```"):
+        return raw[3:-3].strip()
+    return raw
+
+
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(message):
     text = message.text.strip()
@@ -367,7 +468,7 @@ def on_text(message):
             bot.reply_to(message, "\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.")
         return
 
-    if not GEMINI_API_KEY:
+    if not _ai_enabled():
         bot.reply_to(
             message,
             "\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u043e\u0434\u0435 \"\u041f\u043e\u043a\u0430\u0436\u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b \u043f\u043e \u0422\u0435\u043a\u0441\u043e\u043b \u0422\u0440\u0430\u043d\u0441\" "
@@ -378,21 +479,42 @@ def on_text(message):
     try:
         bot.send_chat_action(message.chat.id, "typing")
         companies = ", ".join(list_companies()) or "no companies"
-        prompt = (
-            "You are a Telegram document-search assistant. "
-            f"Companies: {companies}. "
-            "If the user asks for documents/files, return strict JSON "
-            "{\"tool\":\"find_documents\",\"parameters\":{\"query\":\"...\"}}. "
-            "Otherwise return strict JSON {\"reply\":\"...\"}. "
-            f"User request: {text}"
-        )
-        model = genai.GenerativeModel("gemini-flash-latest")
-        resp = model.generate_content(prompt)
-        raw = resp.text.strip()
-        if raw.startswith("```json"):
-            raw = raw[7:-3].strip()
-        elif raw.startswith("```"):
-            raw = raw[3:-3].strip()
+        companies = list_companies()
+        companies_text = "\n".join(f"- {c}" for c in companies) or "Нет компаний"
+
+        prompt = f"""
+        Ты работаешь в системе хранения документов.
+
+        Компании:
+
+        {companies_text}
+
+        Запрос пользователя:
+
+        {text}
+
+        Определи намерение пользователя.
+
+        Если он хочет найти, показать, скачать или открыть документы,
+        верни JSON:
+
+        {{
+        "tool": "find_documents",
+        "parameters": {{
+            "query": "<запрос>"
+        }}
+        }}
+
+        Если пользователь просто общается или задает вопрос,
+        верни:
+
+        {{
+        "reply": "<ответ>"
+        }}
+
+        Ответ должен содержать только JSON.
+        """
+        raw = _strip_json_fence(_generate_ai_text(prompt))
 
         data = json.loads(raw)
         if data.get("tool") == "find_documents":

@@ -618,6 +618,11 @@ def find_documents(query: str) -> list[str]:
     terms = _query_terms(query)
     results: list[str] = []
     seen: set[str] = set()
+    best_company = _resolve_company_name(query, threshold=62)
+    best_company_norm = _norm(best_company)
+    query_norm_exact = _norm(query)
+    if best_company_norm == query_norm_exact:
+        best_company_norm = ""
 
     if _db_ready() and get_cursor is not None:
         try:
@@ -658,6 +663,27 @@ def find_documents(query: str) -> list[str]:
                         ORDER BY d.created_at DESC;
                         """,
                         tuple(f"%{term}%" for term in terms),
+                    )
+                    for (path,) in cursor.fetchall():
+                        path_abs = os.path.abspath(path) if path else ""
+                        if path and os.path.isfile(path) and path_abs not in seen:
+                            results.append(path)
+                            seen.add(path_abs)
+            except Exception:
+                pass
+
+        if best_company_norm:
+            try:
+                with get_cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT d.secure_path
+                        FROM storage_documents d
+                        JOIN storage_companies c ON c.id = d.company_id
+                        WHERE lower(c.name) = %s
+                        ORDER BY d.created_at DESC;
+                        """,
+                        (best_company_norm,),
                     )
                     for (path,) in cursor.fetchall():
                         path_abs = os.path.abspath(path) if path else ""

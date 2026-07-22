@@ -9,6 +9,8 @@ venv/
 .venv/
 env/
 
+storage/secure_files
+
 # секреты
 .env
 
